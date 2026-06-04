@@ -303,7 +303,7 @@ export class LlmClient {
 
   /**
    * 从可能包含多余文本的响应中提取 JSON
-   * 策略：找到最后一个 ```json...``` 块，或最后的 {...} 配对
+   * 策略：找到最后一个 ```json...``` 块，或第一个完整的 {...} 配对
    */
   private extractJson(text: string): string {
     // 1. 找最后一个 ```json ... ``` 块
@@ -314,7 +314,7 @@ export class LlmClient {
       if (content.startsWith('{')) return content;
     }
 
-    // 2. 找最后一个 { ... } 配对
+    // 2. 找第一个完整的 { ... } 配对（从第一个 { 开始，匹配最外层对象）
     const braceMatch = this.matchBalancedBraces(text);
     if (braceMatch) return braceMatch;
 
@@ -350,14 +350,11 @@ export class LlmClient {
   }
 
   /**
-   * 匹配平衡的 { } 括号对，从最后一个 { 开始找配对
+   * 匹配平衡的 { } 括号对，从第一个 { 开始找配对
    */
   private matchBalancedBraces(text: string): string | null {
-    // 从后往前找 { ，这样能跳过前面可能出现的非 JSON 文本
-    let startIdx = -1;
-    for (let i = text.length - 1; i >= 0; i--) {
-      if (text[i] === '{') { startIdx = i; break; }
-    }
+    // 从前往后找第一个 { ，匹配最外层对象
+    const startIdx = text.indexOf('{');
     if (startIdx === -1) return null;
 
     let depth = 0;

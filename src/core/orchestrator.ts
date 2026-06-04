@@ -11,7 +11,7 @@ import type { Task } from '../models/task.js';
 import { loadConfig } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ExecutionLog } from '../utils/execution-log.js';
-import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import chalk from 'chalk';
 
@@ -142,6 +142,12 @@ export class Orchestrator {
       }
 
       this.emitProgress('completed');
+
+      // Phase 5: 生成项目使用文档（在 kill session 之前，避免 pty 清理影响子进程）
+      if (!this.aborted) {
+        await this.saveProjectReadme();
+      }
+
       this.session?.kill();
 
       const summary = this.taskManager.getProgressSummary();
@@ -506,4 +512,169 @@ export class Orchestrator {
     writeFileSync(planPath, lines.join('\n'), 'utf-8');
     logger.info(`执行计划已保存: ${planPath}`);
   }
+
+  /**
+   * 项目完成后生成使用文档 README.md
+   * 用 LLM 根据项目文件结构 + package.json 生成
+   */
+  private async saveProjectReadme(): Promise<void> {
+    const readmePath = join(this.opts.workingDir, 'README.md');
+
+    // 如果已有 README.md 且内容充实，不覆盖
+    if (existsSync(readmePath)) {
+      try {
+        const existing = readFileSync(readmePath, 'utf-8');
+        if (existing.length > 100) return; // 已有文档，跳过
+      } catch { /* 忽略 */ }
+    }
+
+    logger.info(chalk.cyan('📝 生成项目使用文档...'));
+
+    try {
+      const fileTree = this.getProjectFileTree();
+      const packageJson = this.readProjectPackageJson();
+      const configFiles = this.readProjectConfigFiles();
+      const sourceFiles = this.readProjectSourceFiles();
+
+      const readmeContent = await this.llm.chat({
+        system: PROJECT_README_PROMPT,
+        user: `## 项目需求\n${this.opts.requirement}\n\n## package.json\n${packageJson}\n\n## 文件结构\n\`\`\`\n${fileTree}\n\`\`\`\n\n## 源代码\n${sourceFiles}\n\n## 配置文件\n${configFiles}\n\n请直接输出 README.md 的完整内容，不要包含任何解释或多余文本。`,
+        maxTokens: 2048,
+      });
+
+      // 去掉可能的 markdown 代码块包裹
+      let content = readmeContent.trim();
+      if (content.startsWith('```markdown') || content.startsWith('```md')) {
+        content = content.replace(/^```(?:markdown|md)\n?/, '').replace(/\n?```$/, '');
+      } else if (content.startsWith('```')) {
+        content = content.replace(/^```\n?/, '').replace(/\n?```$/, '');
+      }
+
+      if (content.length > 50) {
+        writeFileSync(readmePath, content, 'utf-8');
+        logger.info(chalk.green(`📄 项目使用文档已生成: ${readmePath}`));
+      }
+    } catch (err) {
+      logger.warn(`生成项目文档失败（不影响项目）: ${err instanceof Error ? err.message : err}`);
+    }
+  }
+
+  /**
+   * 读取项目源代码文件内容（用于生成 README）
+   */
+  private readProjectSourceFiles(): string {
+    const extensions = ['.js', '.ts', '.py', '.rs', '.go', '.java', '.html'];
+    const maxFileSize = 3000;
+    let result = '';
+
+    const walk = (dir: string, depth: number) => {
+      if (depth <= 0 || !existsSync(dir)) return;
+      try {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'dist' || e.name === '.aimanager') continue;
+          const fullPath = join(dir, e.name);
+          if (e.isFile() && extensions.some(ext => e.name.endsWith(ext))) {
+            try {
+              const content = readFileSync(fullPath, 'utf-8');
+              if (content.length <= maxFileSize) {
+                result += `\n### ${e.name}\n\`\`\`\n${content}\n\`\`\`\n`;
+              } else {
+                result += `\n### ${e.name}\n\`\`\`\n${content.slice(0, maxFileSize)}\n// ... (truncated)\n\`\`\`\n`;
+              }
+            } catch { /* 忽略 */ }
+          } else if (e.isDirectory()) {
+            walk(fullPath, depth - 1);
+          }
+        }
+      } catch { /* 忽略 */ }
+    };
+
+    walk(this.opts.workingDir, 3);
+    return result || '(无源代码文件)';
+  }
+
+  /**
+   * 获取项目文件树（用于生成 README）
+   */
+  private getProjectFileTree(maxDepth = 3): string {
+    const walk = (dir: string, depth: number, prefix: string): string => {
+      if (depth <= 0 || !existsSync(dir)) return '';
+      try {
+        const entries = readdirSync(dir, { withFileTypes: true })
+          .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist' && e.name !== '.aimanager')
+          .slice(0, 30);
+        let result = '';
+        for (const entry of entries) {
+          const fullPath = join(dir, entry.name);
+          result += `${prefix}${entry.name}${entry.isDirectory() ? '/' : ''}\n`;
+          if (entry.isDirectory()) {
+            result += walk(fullPath, depth - 1, prefix + '  ');
+          }
+        }
+        return result;
+      } catch { return ''; }
+    };
+    return walk(this.opts.workingDir, maxDepth, '');
+  }
+
+  /**
+   * 读取项目的 package.json
+   */
+  private readProjectPackageJson(): string {
+    const pkgPath = join(this.opts.workingDir, 'package.json');
+    if (!existsSync(pkgPath)) return '(无 package.json)';
+    try {
+      const raw = readFileSync(pkgPath, 'utf-8');
+      const pkg = JSON.parse(raw);
+      // 只保留关键字段，避免输出过大
+      const filtered = {
+        name: pkg.name,
+        version: pkg.version,
+        description: pkg.description,
+        scripts: pkg.scripts,
+        dependencies: pkg.dependencies,
+        devDependencies: pkg.devDependencies,
+        bin: pkg.bin,
+        main: pkg.main,
+      };
+      return JSON.stringify(filtered, null, 2);
+    } catch { return '(无法解析 package.json)'; }
+  }
+
+  /**
+   * 读取项目的配置文件（tsconfig, pyproject 等）
+   */
+  private readProjectConfigFiles(): string {
+    const configNames = ['tsconfig.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'requirements.txt', 'config.json'];
+    let result = '';
+    for (const name of configNames) {
+      const path = join(this.opts.workingDir, name);
+      if (existsSync(path)) {
+        try {
+          const content = readFileSync(path, 'utf-8');
+          result += `\n### ${name}\n\`\`\`\n${content.slice(0, 1500)}\n\`\`\`\n`;
+        } catch { /* 忽略 */ }
+      }
+    }
+    return result || '(无配置文件)';
+  }
 }
+
+const PROJECT_README_PROMPT = `CRITICAL: Output ONLY the raw Markdown content of a README.md file. No explanation, no questions, no conversation. Start directly with # title.
+
+你是一个项目文档专家。根据项目信息生成一份实用的中文 README.md。
+
+## 必须包含的部分
+
+1. **项目名称和简介**
+2. **功能特性**（根据源代码推断）
+3. **安装步骤**（具体的依赖安装命令）
+4. **使用方法**（启动命令 + 使用示例，直接复制就能跑）
+5. **项目结构**（关键目录/文件说明）
+
+## 规则
+
+- 用中文撰写
+- 用实际的命令、文件名、参数名
+- 简洁实用，每句话都要有信息量
+- 不要包含 AI Manager 相关内容`;
