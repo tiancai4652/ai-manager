@@ -103,7 +103,7 @@ node dist/index.js run "..." --debug
 📋 需求: 做一个 Todo App
 📂 目录: ./ai-manager-workspace/20260604-093000
 🤖 Agent: claude-code
-🧠 Brain: claude-sonnet-4-20250514 (auto)
+🧠 Brain: glm-5.1 (auto)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 💬 需求讨论
@@ -212,6 +212,40 @@ node dist/index.js run "实现用户注册登录 API" \
   --agent codex
 ```
 
+### `model` — 选择模型
+
+```bash
+# 交互式选择（推荐，列出所有可用模型让你选）
+node dist/index.js model
+
+# 列出所有模型（不进入交互，只显示列表）
+node dist/index.js model list
+
+# 直接设置模型 ID
+node dist/index.js model set glm-5-turbo
+```
+
+交互式选择示例：
+
+```
+$ node dist/index.js model
+
+可用模型:
+
+  1. glm-4.5       (GLM-4.5)
+  2. glm-4.5-air   (GLM-4.5-Air)
+  3. glm-4.6       (GLM-4.6)
+  4. glm-4.7       (GLM-4.7)
+  5. glm-5         (GLM-5)
+  6. glm-5-turbo   (GLM-5-Turbo)
+> 7. glm-5.1       (GLM-5.1)          ← 当前
+
+  请选择 [1-7]: 6
+✅ 已设置模型: glm-5-turbo (GLM-5-Turbo)
+```
+
+模型列表从 Anthropic API 动态拉取，无 API key 时使用内置列表。选中的模型保存在配置中，后续 `run` 会自动使用。也可以用 `--model` 参数临时覆盖。
+
 ### `config` — 管理配置
 
 ```bash
@@ -239,7 +273,7 @@ node dist/index.js config set analysisInterval 5000
 | `maxRetries` | number | `3` | 单个任务最大重试次数 |
 | `analysisInterval` | number | `3000` | 输出分析间隔（毫秒），越小反应越快但 API 调用越多 |
 | `taskTimeout` | number | `300000` | 单任务超时（毫秒），默认 5 分钟 |
-| `brainModel` | string | `claude-sonnet-4-20250514` | "大脑"用的 LLM 模型 |
+| `brainModel` | string | `glm-5.1` | "大脑"用的 LLM 模型（可通过 `aimanager model` 交互选择） |
 | `brainMode` | string | `auto` | "大脑"调用方式，见下文 |
 | `terminalCols` | number | `120` | 伪终端列数 |
 | `terminalRows` | number | `40` | 伪终端行数 |
@@ -438,7 +472,7 @@ ai-manager/
 ├── src/
 │   ├── index.ts                     # 入口
 │   ├── cli/
-│   │   └── commands.ts              # CLI 命令（run / config，含 --model）
+│   │   └── commands.ts              # CLI 命令（run / model / config）
 │   ├── core/
 │   │   ├── orchestrator.ts          # 核心编排循环
 │   │   ├── task-manager.ts          # 任务管理
