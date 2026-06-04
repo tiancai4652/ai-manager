@@ -1,0 +1,66 @@
+{
+  "name": "ccreminder",
+  "version": "1.0.0",
+  "description": "Windows 桌面提醒助手 — 系统托盘 + 定时提醒 + 通知",
+  "main": "src/main.js",
+  "author": "CCReminder",
+  "license": "ISC",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win",
+    "build:dir": "electron-builder --win --dir",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "build": {
+    "appId": "com.ccreminder.app",
+    "productName": "CCReminder",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "config/**/*",
+      "resources/**/*",
+      "node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "resources/icon.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "resources/icon.png",
+      "uninstallerIcon": "resources/icon.png",
+      "installerHeaderIcon": "resources/icon.png",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CCReminder"
+    },
+    "extraResources": [
+      {
+        "from": "resources",
+        "to": "resources"
+      }
+    ]
+  },
+  "dependencies": {
+    "cron": "^4.4.0",
+    "electron-windows-store": "^2.1.0",
+    "node-notifier": "^10.0.1",
+    "uuid": "^14.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/uuid": "^10.0.0",
+    "electron": "^42.3.3",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3"
+  }
+}
