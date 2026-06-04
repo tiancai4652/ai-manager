@@ -6,7 +6,7 @@ import { Orchestrator, type OrchestratorOptions } from '../core/orchestrator.js'
 import { RequirementDiscusser } from '../core/requirement-discusser.js';
 import { PlanParser } from '../core/plan-parser.js';
 import { LlmClient } from '../brain/llm-client.js';
-import { loadConfig, saveConfig } from '../utils/config.js';
+import { loadConfig, saveConfig, fetchAvailableModels, type ModelInfo } from '../utils/config.js';
 import { logger, setLogLevel, LogLevel } from '../utils/logger.js';
 import { registerReminderCommands } from '../reminder/cli/commands.js';
 import chalk from 'chalk';
@@ -272,6 +272,74 @@ export function createProgram(): Command {
       }
     });
 
+  // ─── model 子命令 ─────────────────────────────────────
+  const modelCmd = program
+    .command('model')
+    .description('查看和选择大脑 LLM 模型');
+
+  // aimanager model (无子命令 → 交互式选择)
+  modelCmd
+    .command('pick', { isDefault: true })
+    .description('交互式选择模型（默认动作）')
+    .action(async () => {
+      const config = loadConfig();
+      const models = await fetchAvailableModels();
+
+      console.log(chalk.cyan('\n可用模型:\n'));
+
+      // 找到最长 id 用于对齐
+      const maxIdLen = Math.max(...models.map(m => m.id.length));
+      models.forEach((m, i) => {
+        const isCurrent = m.id === config.brainModel;
+        const marker = isCurrent ? chalk.green('  ← 当前') : '';
+        const num = isCurrent ? chalk.green(`> ${i + 1}.`) : `  ${i + 1}.`;
+        console.log(`${num} ${chalk.white(m.id.padEnd(maxIdLen))}  ${chalk.gray(`(${m.display_name})`)}${marker}`);
+      });
+
+      console.log();
+      const choice = await promptChoice(`请选择 [1-${models.length}]`, models.length);
+      if (choice === null) {
+        console.log(chalk.yellow('已取消'));
+        return;
+      }
+      const selected = models[choice - 1];
+      saveConfig({ brainModel: selected.id });
+      console.log(chalk.green(`✅ 已设置模型: ${selected.id} (${selected.display_name})`));
+    });
+
+  // aimanager model list
+  modelCmd
+    .command('list')
+    .description('列出所有可用模型')
+    .action(async () => {
+      const config = loadConfig();
+      const models = await fetchAvailableModels();
+
+      const maxIdLen = Math.max(...models.map(m => m.id.length));
+      models.forEach(m => {
+        const isCurrent = m.id === config.brainModel;
+        const marker = isCurrent ? chalk.green('  ← 当前') : '';
+        console.log(`  ${chalk.white(m.id.padEnd(maxIdLen))}  ${chalk.gray(`(${m.display_name})`)}${marker}`);
+      });
+    });
+
+  // aimanager model set <id>
+  modelCmd
+    .command('set')
+    .description('直接设置模型 ID')
+    .argument('<id>', '模型 ID')
+    .action(async (id: string) => {
+      const models = await fetchAvailableModels();
+      const found = models.find(m => m.id === id);
+      if (!found) {
+        console.error(chalk.red(`❌ 未知模型: ${id}`));
+        console.log(chalk.gray('可用模型: ' + models.map(m => m.id).join(', ')));
+        process.exit(1);
+      }
+      saveConfig({ brainModel: found.id });
+      console.log(chalk.green(`✅ 已设置模型: ${found.id} (${found.display_name})`));
+    });
+
   // ─── reminder 子系统命令 ────────────────────────────
   registerReminderCommands(program);
 
@@ -314,6 +382,34 @@ function promptConfirm(message: string): Promise<boolean> {
       rl.close();
       const trimmed = answer.trim().toLowerCase();
       resolve(trimmed === '' || trimmed === 'y' || trimmed === 'yes' || trimmed === '是');
+    });
+  });
+}
+
+/**
+ * 编号选择提示（1..max），输入空则返回 null
+ */
+function promptChoice(message: string, max: number): Promise<number | null> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    rl.question(chalk.yellow(`  ${message}: `), (answer: string) => {
+      rl.close();
+      const trimmed = answer.trim();
+      if (trimmed === '' || trimmed === 'q') {
+        resolve(null);
+        return;
+      }
+      const num = parseInt(trimmed, 10);
+      if (isNaN(num) || num < 1 || num > max) {
+        console.log(chalk.red(`  无效选择: ${trimmed}`));
+        resolve(null);
+        return;
+      }
+      resolve(num);
     });
   });
 }

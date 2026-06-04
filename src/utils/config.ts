@@ -2,6 +2,7 @@ import { z } from 'zod/v4';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import Anthropic from '@anthropic-ai/sdk';
 
 const ConfigSchema = z.object({
   /** 默认编码 AI 类型 */
@@ -88,4 +89,48 @@ export function applyCliOverrides(config: Config, overrides: string[]): Config {
     }
   }
   return ConfigSchema.parse(result);
+}
+
+// ─── 模型列表 ────────────────────────────────────────────
+
+export interface ModelInfo {
+  id: string;
+  display_name: string;
+}
+
+/**
+ * 硬编码的 fallback 模型列表（API 不可用时使用）
+ */
+export const HARDCODED_MODELS: ModelInfo[] = [
+  { id: 'glm-4.5', display_name: 'GLM-4.5' },
+  { id: 'glm-4.5-air', display_name: 'GLM-4.5-Air' },
+  { id: 'glm-4.6', display_name: 'GLM-4.6' },
+  { id: 'glm-4.7', display_name: 'GLM-4.7' },
+  { id: 'glm-5', display_name: 'GLM-5' },
+  { id: 'glm-5-turbo', display_name: 'GLM-5-Turbo' },
+  { id: 'glm-5.1', display_name: 'GLM-5.1' },
+];
+
+/**
+ * 从 Anthropic API 拉取可用模型列表
+ * 无 API key 时 fallback 到硬编码列表
+ */
+export async function fetchAvailableModels(): Promise<ModelInfo[]> {
+  const config = loadConfig();
+  const apiKey = config.apiKey ?? process.env.ANTHROPIC_API_KEY;
+
+  if (!apiKey) {
+    return HARDCODED_MODELS;
+  }
+
+  try {
+    const client = new Anthropic({ apiKey });
+    const response = await client.models.list({ limit: 100 });
+    const models: ModelInfo[] = response.data
+      .map(m => ({ id: m.id, display_name: (m as unknown as Record<string, unknown>).display_name as string ?? m.id }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+    return models.length > 0 ? models : HARDCODED_MODELS;
+  } catch {
+    return HARDCODED_MODELS;
+  }
 }
