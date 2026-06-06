@@ -1,11 +1,12 @@
 import * as readline from 'node:readline';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { Orchestrator, type OrchestratorOptions } from '../core/orchestrator.js';
 import { RequirementDiscusser } from '../core/requirement-discusser.js';
 import { PlanParser } from '../core/plan-parser.js';
 import { LlmClient } from '../brain/llm-client.js';
+import { ProjectScanner } from '../core/project-scanner.js';
 import { loadConfig, saveConfig, fetchAvailableModels, type ModelInfo } from '../utils/config.js';
 import { logger, setLogLevel, LogLevel } from '../utils/logger.js';
 import { registerReminderCommands } from '../reminder/cli/commands.js';
@@ -105,16 +106,18 @@ export function createProgram(): Command {
   program
     .command('run')
     .description('启动一个任务，先讨论需求，确认后自动执行')
-    .argument('<requirement>', '任务需求描述（可以是粗略的，会引导你细化）')
+    .argument('[requirement]', '任务需求描述（可选，不提供则交互式输入）')
     .option('-d, --dir <path>', '工作目录（默认: ./ai-manager-workspace/<timestamp>）')
     .option('-a, --agent <type>', '编码 AI 类型: claude-code | codex', 'claude-code')
     .option('-m, --model <model>', '大脑 LLM 模型 (如 claude-sonnet-4-20250514, claude-opus-4-8)')
+    .option('-r, --req-doc <path>', '需求文档路径（支持 .md / .txt）')
     .option('-y, --yes', '跳过讨论和确认，直接执行', false)
     .option('--debug', '调试模式', false)
-    .action(async (requirement: string, opts: {
+    .action(async (requirement: string | undefined, opts: {
       dir?: string;
       agent: 'claude-code' | 'codex';
       model?: string;
+      reqDoc?: string;
       yes: boolean;
       debug: boolean;
     }) => {
@@ -124,38 +127,75 @@ export function createProgram(): Command {
 
       const config = loadConfig();
 
-      // 确定工作目录
-      const workingDir = resolveWorkingDir(opts.dir);
+      // 确定工作目录和模式
+      const { path: workingDir, mode } = resolveWorkingDir(opts.dir);
+
+      // 扫描项目上下文
+      const projectContext = ProjectScanner.scan(workingDir, mode);
 
       // 确定模型
       const brainModel = opts.model ?? config.brainModel;
       const llm = new LlmClient(brainModel);
 
+      // ─── 确定需求 ─────────────────────────────────────
+      // 优先级：命令行参数 > 需求文档文件 > 交互式输入
+      let finalRequirement = requirement;
+
+      if (!finalRequirement && opts.reqDoc) {
+        // 从文件读取需求
+        const docPath = resolve(opts.reqDoc);
+        if (!existsSync(docPath)) {
+          console.error(chalk.red(`❌ 需求文档不存在: ${docPath}`));
+          process.exit(1);
+        }
+        try {
+          finalRequirement = readFileSync(docPath, 'utf-8').trim();
+          console.log(chalk.green(`📄 已加载需求文档: ${docPath} (${finalRequirement.length} 字)`));
+        } catch (err) {
+          console.error(chalk.red(`❌ 读取需求文档失败: ${err}`));
+          process.exit(1);
+        }
+      }
+
+      if (!finalRequirement) {
+        // 交互式输入需求
+        finalRequirement = await promptMultilineInput(workingDir, mode, projectContext) ?? undefined;
+        if (!finalRequirement) {
+          console.log(chalk.yellow('未提供需求，退出。'));
+          process.exit(0);
+        }
+      }
+
+      const modeLabel = mode === 'modify'
+        ? chalk.yellow('🔧 修改模式：在已有项目上工作')
+        : chalk.green('🆕 新建模式：将创建新项目');
+
       console.log(chalk.cyan(`
 🎯 AI Manager v0.1.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 需求: ${requirement.slice(0, 60)}${requirement.length > 60 ? '...' : ''}
+📋 需求: ${finalRequirement.slice(0, 60)}${finalRequirement.length > 60 ? '...' : ''}
 📂 目录: ${workingDir}
+${modeLabel}
 🤖 Agent: ${opts.agent}
 🧠 Brain: ${brainModel} (${config.brainMode})
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `));
 
-      let refinedRequirement = requirement;
+      let refinedRequirement = finalRequirement;
       let preParsedTasks: OrchestratorOptions['preParsedTasks'] = undefined;
       let requirementDocPath: string | undefined;
 
       if (!opts.yes) {
         // ====== Phase 1: 需求讨论 ======
         const discusser = new RequirementDiscusser(llm);
-        const discussionResult = await discusser.discuss(requirement, workingDir);
+        const discussionResult = await discusser.discuss(finalRequirement, workingDir, projectContext);
         refinedRequirement = discussionResult.refinedRequirement;
         requirementDocPath = discussionResult.documentPath;
 
         // ====== Phase 2: 解析并展示计划 ======
         console.log(chalk.cyan('\n🧠 解析任务计划...\n'));
         const planParser = new PlanParser(llm);
-        const parsed = await planParser.parse(refinedRequirement, workingDir);
+        const parsed = await planParser.parse(refinedRequirement, workingDir, projectContext);
 
         console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
         console.log(chalk.cyan('📋 执行计划:'));
@@ -189,6 +229,7 @@ export function createProgram(): Command {
         brainModel,
         preParsedTasks,
         requirementDocPath,
+        projectContext,
         onProgress: (info) => display.update(info),
         onComplete: (plan) => {
           display.stop();
@@ -203,9 +244,11 @@ export function createProgram(): Command {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `));
         },
-        onIntervention: (reason) => {
+        onIntervention: async (reason) => {
           display.stop();
-          console.log(chalk.yellow(`\n⚠️  需要人工介入: ${reason}`));
+          const response = await promptUserIntervention(reason);
+          // display 没有 start()，下次 update() 时 spinner 会自动重建
+          return response;
         },
       });
 
@@ -347,24 +390,115 @@ export function createProgram(): Command {
 }
 
 /**
- * 解析工作目录
- * 如果没指定，创建一个带时间戳的默认目录
+ * 交互式多行需求输入
+ *
+ * 没提供 requirement 参数时触发：
+ * - 显示项目/目录上下文提示
+ * - 支持多行输入，空行两次结束
+ * - 也支持粘贴需求文档路径
  */
-function resolveWorkingDir(dir?: string): string {
+function promptMultilineInput(workingDir: string, mode: 'new' | 'modify', projectContext: import('../models/project-context.js').ProjectContext): Promise<string | null> {
+  return new Promise((_resolve) => {
+    console.log(chalk.cyan('\n💬 请描述你的需求'));
+    console.log(chalk.gray('─'.repeat(50)));
+
+    if (mode === 'modify') {
+      console.log(chalk.gray(`  📂 项目: ${workingDir}`));
+      // 从 README 或 package.json 提取项目名
+      const pkgMatch = projectContext.packageInfo.match(/"name":\s*"([^"]+)"/);
+      if (pkgMatch) {
+        console.log(chalk.gray(`  📦 项目名: ${pkgMatch[1]}`));
+      }
+    }
+
+    console.log(chalk.gray('  输入需求描述，支持多行。连续两次回车结束输入。'));
+    console.log(chalk.gray('  也可以直接输入需求文档路径（.md / .txt）'));
+    console.log(chalk.gray('─'.repeat(50)));
+    process.stdout.write(chalk.yellow('  > '));
+
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    const lines: string[] = [];
+    let lastWasEmpty = false;
+    let done = false;
+
+    rl.on('line', (line: string) => {
+      if (done) return;
+      if (line.trim() === '') {
+        if (lastWasEmpty || lines.length === 0) {
+          // 连续空行或第一行就空 → 结束
+          done = true;
+          rl.close();
+          const result = lines.join('\n').trim();
+          _resolve(result || null);
+          return;
+        }
+        lastWasEmpty = true;
+        lines.push('');
+      } else {
+        lastWasEmpty = false;
+        lines.push(line);
+      }
+      if (!done) {
+        process.stdout.write(chalk.yellow('  > '));
+      }
+    });
+
+    rl.on('close', () => {
+      if (done) return; // 已在 line 事件中 _resolve
+      const result = lines.join('\n').trim();
+
+      // 检查是否是文件路径
+      if (result) {
+        const absPath = resolve(result);
+        if (existsSync(absPath)) {
+          const lower = result.toLowerCase();
+          if (lower.endsWith('.md') || lower.endsWith('.txt') || lower.endsWith('.markdown')) {
+            try {
+              const content = readFileSync(absPath, 'utf-8').trim();
+              console.log(chalk.green(`  📄 已加载需求文档: ${result} (${content.length} 字)`));
+              _resolve(content);
+              return;
+            } catch {
+              // 读取失败，当作普通需求文本
+            }
+          }
+        }
+      }
+
+      _resolve(result || null);
+    });
+  });
+}
+
+/**
+ * 解析工作目录并检测模式
+ * 如果目录已有文件 → modify 模式；否则 → new 模式
+ */
+function resolveWorkingDir(dir?: string): { path: string; mode: 'new' | 'modify' } {
   if (dir) {
     const abs = resolve(dir);
-    if (!existsSync(abs)) {
+    if (existsSync(abs)) {
+      const entries = readdirSync(abs).filter(e => !e.startsWith('.'));
+      if (entries.length > 0) {
+        console.log(chalk.cyan(`📂 检测到已有项目 (${entries.length} 项)`));
+        return { path: abs, mode: 'modify' };
+      }
+    } else {
       mkdirSync(abs, { recursive: true });
     }
-    return abs;
+    return { path: abs, mode: 'new' };
   }
 
   // 默认: ./ai-manager-workspace/<YYYYMMDD-HHmmss>
-  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
   const defaultDir = resolve(`./ai-manager-workspace/${ts}`);
   mkdirSync(defaultDir, { recursive: true });
   console.log(chalk.gray(`📂 未指定工作目录，自动创建: ${defaultDir}`));
-  return defaultDir;
+  return { path: defaultDir, mode: 'new' };
 }
 
 /**
@@ -382,6 +516,25 @@ function promptConfirm(message: string): Promise<boolean> {
       rl.close();
       const trimmed = answer.trim().toLowerCase();
       resolve(trimmed === '' || trimmed === 'y' || trimmed === 'yes' || trimmed === '是');
+    });
+  });
+}
+
+/**
+ * 人工介入提示：暂停等待用户输入，将回复转达给 AI
+ */
+function promptUserIntervention(reason: string): Promise<string> {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    console.log(chalk.yellow(`\n\n⏸️  需要人工介入: ${reason}`));
+    console.log(chalk.gray('  输入回复发给 AI（直接 Enter 表示已处理，无消息）'));
+    rl.question('  > ', (answer: string) => {
+      rl.close();
+      resolve(answer.trim());
     });
   });
 }

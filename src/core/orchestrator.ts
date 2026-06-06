@@ -42,8 +42,8 @@ export interface OrchestratorOptions {
   projectContext?: ProjectContext;
   /** 完成时的回调 */
   onComplete?: (plan: Plan) => void;
-  /** 需要人工介入时的回调 */
-  onIntervention?: (reason: string) => void;
+  /** 需要人工介入时的回调，返回用户输入的内容 */
+  onIntervention?: (reason: string) => Promise<string>;
   /** 进度更新回调 */
   onProgress?: (info: ProgressInfo) => void;
 }
@@ -52,7 +52,7 @@ export interface OrchestratorOptions {
  * 进度信息
  */
 export interface ProgressInfo {
-  phase: 'planning' | 'executing' | 'reviewing' | 'completed' | 'failed';
+  phase: 'planning' | 'executing' | 'reviewing' | 'paused' | 'completed' | 'failed';
   currentTask?: Task;
   taskProgress: string;
   terminalPreview: string;
@@ -345,9 +345,19 @@ export class Orchestrator {
     if (analysis.needsIntervention) {
       logger.warn(chalk.red(`  ⚠️ 需要人工介入: ${analysis.summary}`));
       this.execLog.error(`需要人工介入: ${analysis.summary}`);
-      this.opts.onIntervention?.(analysis.summary);
-      this.taskManager.updateStatus(task.id, 'blocked');
-      this.execLog.taskStatus(task.title, 'blocked');
+      this.emitProgress('paused', task, { brainActivity: '⏸️ 等待人工介入...' });
+
+      // 暂停等待用户回应
+      const userResponse = await this.opts.onIntervention?.(analysis.summary) ?? '';
+
+      if (userResponse) {
+        this.execLog.instructionSent(`[人工介入] ${userResponse}`);
+        this.safeWrite(userResponse);
+        await this.safeSleep(300);
+        this.safeWrite('\r');
+        await this.safeSleep(3000);
+      }
+      // 恢复监控循环（不标记 blocked，任务继续）
       return;
     }
 
