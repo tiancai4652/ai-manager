@@ -223,7 +223,25 @@ export class Orchestrator {
       // 等待一个分析间隔
       await this.safeSleep(this.config.analysisInterval);
 
-      // 分析终端输出
+      // 快速路径：扫描 [NEED_HUMAN] 关键词（零 token）
+      const interventionReason = this.session?.output?.scanInterventionSignal();
+      if (interventionReason) {
+        logger.warn(chalk.red(`  ⚠️ AI 请求人工介入: ${interventionReason}`));
+        this.execLog.error(`AI 请求人工介入: ${interventionReason}`);
+        this.emitProgress('paused', task, { brainActivity: '⏸️ 等待人工介入...' });
+
+        const userResponse = await this.opts.onIntervention?.(interventionReason) ?? '';
+        if (userResponse) {
+          this.execLog.instructionSent(`[人工介入] ${userResponse}`);
+          this.safeWrite(userResponse);
+          await this.safeSleep(300);
+          this.safeWrite('\r');
+          await this.safeSleep(3000);
+        }
+        continue; // 恢复监控循环
+      }
+
+      // 分析终端输出（大脑 LLM）
       const analysis = await this.analyzeOutput(task);
       this.execLog.stateJudgment(analysis.state, analysis.summary);
       this.emitProgress('executing', task, {

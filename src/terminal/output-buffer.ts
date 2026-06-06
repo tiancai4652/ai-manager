@@ -63,6 +63,19 @@ export class OutputBuffer {
     return lines[lines.length - 1] ?? '';
   }
 
+  /**
+   * 扫描输出中的人工介入信号 [NEED_HUMAN]...[/NEED_HUMAN]
+   * 返回标记内的原因文本，未找到返回 null
+   */
+  scanInterventionSignal(): string | null {
+    const text = this.cleanChunks.join('');
+    const match = text.match(/\[NEED_HUMAN\]([\s\S]*?)\[\/NEED_HUMAN\]/);
+    if (match) {
+      return match[1].trim();
+    }
+    return null;
+  }
+
   /** 清空缓冲区 */
   clear(): void {
     this.rawChunks = [];
