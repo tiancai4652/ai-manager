@@ -79,12 +79,10 @@ export class PtySession {
     this.outputCallbacks = this.outputCallbacks.filter(cb => cb !== callback);
   }
 
-  /** 写入输入 */
+  /** 写入输入（进程已死时静默忽略） */
   write(data: string): void {
-    if (!this.pty) {
-      throw new Error('PTY not spawned');
-    }
-    this.pty.write(data);
+    if (!this.isAlive()) return;
+    this.pty!.write(data);
   }
 
   /** 发送一行命令 */
@@ -109,13 +107,17 @@ export class PtySession {
     return this.exitPromise;
   }
 
-  /** 终止进程 */
+  /** 终止进程（重复调用或进程已死均安全） */
   kill(): void {
-    if (this.pty) {
+    if (!this.pty) return;
+    try {
       logger.debug('Killing PTY session');
       this.pty.kill();
-      this.pty = null;
+    } catch {
+      // 进程可能已自行退出，忽略清理错误
     }
+    this.pty = null;
+    this.exitCode = this.exitCode ?? -1;
   }
 
   /** 获取 PID */

@@ -4,14 +4,16 @@ import { InstructionGenerator } from '../brain/instruction-generator.js';
 import { QualityReviewer } from '../brain/quality-reviewer.js';
 import { PlanParser } from './plan-parser.js';
 import { TaskManager } from './task-manager.js';
+import { ProjectScanner } from './project-scanner.js';
 import { LlmClient } from '../brain/llm-client.js';
 import type { Plan } from '../models/plan.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { Task } from '../models/task.js';
+import type { ProjectContext } from '../models/project-context.js';
 import { loadConfig } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
 import { ExecutionLog } from '../utils/execution-log.js';
-import { writeFileSync, mkdirSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { writeFileSync, mkdirSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import chalk from 'chalk';
 
@@ -36,6 +38,8 @@ export interface OrchestratorOptions {
   }>;
   /** 需求文档路径 */
   requirementDocPath?: string;
+  /** 项目上下文（modify 模式时传入，包含已有代码信息） */
+  projectContext?: ProjectContext;
   /** 完成时的回调 */
   onComplete?: (plan: Plan) => void;
   /** 需要人工介入时的回调 */
@@ -103,7 +107,7 @@ export class Orchestrator {
         this.taskManager.createTasks(this.opts.preParsedTasks);
       } else {
         logger.info(chalk.cyan('🎯 开始解析需求...'));
-        const parsed = await this.planParser.parse(this.opts.requirement, this.opts.workingDir);
+        const parsed = await this.planParser.parse(this.opts.requirement, this.opts.workingDir, this.opts.projectContext);
         this.taskManager.createTasks(parsed.tasks);
       }
 
@@ -188,19 +192,19 @@ export class Orchestrator {
     // 生成初始指令
     this.execLog.brainCall('生成指令', task.title);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成指令...' });
-    const instruction = await this.instructionGenerator.generateInitialInstruction(task);
+    const instruction = await this.instructionGenerator.generateInitialInstruction(task, this.opts.projectContext);
     this.execLog.brainResponse('生成指令', instruction.content);
     this.taskManager.recordInstruction(task.id, instruction.content);
 
     logger.info(chalk.blue(`  → 发送指令: ${instruction.content.slice(0, 80)}...`));
     this.execLog.instructionSent(instruction.content);
     // Claude Code 输入框需要文本先落定，再单独按回车提交
-    this.session!.write(instruction.content);
-    await this.session!.input.sleep(500);
-    this.session!.write('\r');
-    await this.session!.input.sleep(instruction.waitFor);
+    this.safeWrite(instruction.content);
+    await this.safeSleep(500);
+    this.safeWrite('\r');
+    await this.safeSleep(instruction.waitFor);
 
-    // 进入监控循环
+    // 进入监控循环（修复后也回到此循环，而非递归调用）
     let consecutiveIdle = 0;
     const maxIdle = 3;
     const maxCycles = 60;
@@ -209,8 +213,15 @@ export class Orchestrator {
     while (cycle < maxCycles && !this.aborted) {
       cycle++;
 
+      // 检测终端是否意外退出
+      if (!this.session?.isAlive()) {
+        logger.warn('编码 AI 终端意外退出');
+        this.execLog.error('编码 AI 终端意外退出');
+        break;
+      }
+
       // 等待一个分析间隔
-      await this.session!.input.sleep(this.config.analysisInterval);
+      await this.safeSleep(this.config.analysisInterval);
 
       // 分析终端输出
       const analysis = await this.analyzeOutput(task);
@@ -220,6 +231,8 @@ export class Orchestrator {
       });
 
       logger.debug(`  状态: ${analysis.state} — ${analysis.summary}`);
+
+      let shouldReturn = false;
 
       switch (analysis.state) {
         case 'working':
@@ -238,16 +251,20 @@ export class Orchestrator {
 
         case 'completed':
           consecutiveIdle = 0;
-          await this.handleCompleted(task);
-          return;
+          shouldReturn = !(await this.handleCompleted(task));
+          if (shouldReturn) return;
+          // handleCompleted 返回 true → 修复指令已发送，重置计数继续监控
+          consecutiveIdle = 0;
+          break;
 
         case 'idle':
           consecutiveIdle++;
           if (consecutiveIdle >= maxIdle) {
             logger.info('  终端空闲，检查任务是否完成...');
             this.execLog.info(`任务 ${task.title} 连续 ${maxIdle} 次 idle，进行最终评审`);
-            await this.handleCompleted(task);
-            return;
+            shouldReturn = !(await this.handleCompleted(task));
+            if (shouldReturn) return;
+            consecutiveIdle = 0;
           }
           break;
 
@@ -267,13 +284,16 @@ export class Orchestrator {
   private async analyzeOutput(task: Task): Promise<OutputAnalysis> {
     this.emitProgress('executing', task, { brainActivity: '🧠 分析终端输出...' });
     try {
+      if (!this.session?.isAlive()) {
+        return { state: 'unknown' as const, summary: '终端已断开', detectedIssues: [], needsIntervention: false };
+      }
       const result = await this.outputAnalyzer.analyze(
-        this.session!.output,
+        this.session.output,
         `${task.title}: ${task.description}`
       );
       this.execLog.brainResponse('输出分析', `${result.state}: ${result.summary}`);
       // 记录终端快照
-      const snapshot = this.session!.output.getRecentLines(10);
+      const snapshot = this.session.output.getRecentLines(10);
       this.execLog.terminalSnapshot(snapshot);
       return result;
     } catch (err) {
@@ -292,7 +312,7 @@ export class Orchestrator {
    * 处理等待输入状态
    */
   private async handleWaitingInput(task: Task, analysis: OutputAnalysis): Promise<void> {
-    const recentOutput = this.session!.output.getRecentLines(20);
+    const recentOutput = this.session?.output?.getRecentLines(20) ?? '';
 
     let instruction;
     if (analysis.suggestedInput) {
@@ -304,6 +324,7 @@ export class Orchestrator {
         task,
         analysis,
         recentOutput,
+        projectContext: this.opts.projectContext,
       });
       this.execLog.brainResponse('生成响应', instruction.content);
     }
@@ -311,10 +332,10 @@ export class Orchestrator {
     logger.info(chalk.blue(`  → 响应输入: ${instruction.content.slice(0, 60)}`));
     this.execLog.instructionSent(instruction.content);
     this.taskManager.recordInstruction(task.id, instruction.content);
-    this.session!.write(instruction.content);
-    await this.session!.input.sleep(300);
-    this.session!.write('\r');
-    await this.session!.input.sleep(instruction.waitFor);
+    this.safeWrite(instruction.content);
+    await this.safeSleep(300);
+    this.safeWrite('\r');
+    await this.safeSleep(instruction.waitFor);
   }
 
   /**
@@ -330,33 +351,35 @@ export class Orchestrator {
       return;
     }
 
-    const recentOutput = this.session!.output.getRecentLines(30);
+    const recentOutput = this.session?.output?.getRecentLines(30) ?? '';
     this.execLog.brainCall('错误恢复', analysis.summary);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成错误修复...' });
     const instruction = await this.instructionGenerator.generateResponse({
       task,
       analysis,
       recentOutput,
+      projectContext: this.opts.projectContext,
     });
     this.execLog.brainResponse('错误恢复', instruction.content);
 
     logger.info(chalk.blue(`  → 错误恢复: ${instruction.content.slice(0, 60)}`));
     this.execLog.instructionSent(instruction.content);
     this.taskManager.recordInstruction(task.id, instruction.content);
-    this.session!.write(instruction.content);
-    await this.session!.input.sleep(300);
-    this.session!.write('\r');
-    await this.session!.input.sleep(instruction.waitFor);
+    this.safeWrite(instruction.content);
+    await this.safeSleep(300);
+    this.safeWrite('\r');
+    await this.safeSleep(instruction.waitFor);
   }
 
   /**
    * 处理任务完成（进入质量评审）
+   * 返回 true 表示需要重新进入监控循环（修复指令已发送）
    */
-  private async handleCompleted(task: Task): Promise<void> {
+  private async handleCompleted(task: Task): Promise<boolean> {
     this.emitProgress('reviewing', task, { brainActivity: '🔍 质量评审中...' });
     logger.info(chalk.cyan('  🔍 质量评审中...'));
 
-    const terminalOutput = this.session!.output.getFullCleanText();
+    const terminalOutput = this.session?.output?.getFullCleanText() ?? '';
     const review = await this.qualityReviewer.review(
       task,
       this.opts.workingDir,
@@ -371,6 +394,7 @@ export class Orchestrator {
       this.taskManager.updateStatus(task.id, 'completed');
       this.execLog.taskStatus(task.title, `completed (评分: ${review.score}/10)`);
       logger.info(chalk.green(`  ✅ 任务完成! 评分: ${review.score}/10`));
+      return false;
     } else if (this.taskManager.canRetry(task.id)) {
       logger.warn(chalk.yellow(`  ⚠️ 评审未通过 (评分: ${review.score}/10)，准备重试...`));
       if (review.issues.length > 0) {
@@ -384,6 +408,7 @@ export class Orchestrator {
         task,
         issues: review.issues,
         suggestedFix: review.suggestedFix,
+        projectContext: this.opts.projectContext,
       });
       this.execLog.brainResponse('生成修复', fixInstruction.content);
 
@@ -392,16 +417,17 @@ export class Orchestrator {
 
       logger.info(chalk.blue(`  → 修复指令: ${fixInstruction.content.slice(0, 80)}...`));
       this.execLog.instructionSent(fixInstruction.content);
-      this.session!.write(fixInstruction.content);
-      await this.session!.input.sleep(300);
-      this.session!.write('\r');
-      await this.session!.input.sleep(fixInstruction.waitFor);
+      this.safeWrite(fixInstruction.content);
+      await this.safeSleep(300);
+      this.safeWrite('\r');
+      await this.safeSleep(fixInstruction.waitFor);
 
-      await this.executeTask(task);
+      return true; // 通知调用方重新进入监控循环
     } else {
       this.taskManager.updateStatus(task.id, 'failed');
       this.execLog.taskStatus(task.title, 'failed (重试耗尽)');
       logger.error(chalk.red(`  ❌ 任务失败，已耗尽重试次数`));
+      return false;
     }
   }
 
@@ -447,6 +473,26 @@ export class Orchestrator {
     // 等待编码 AI 启动
     logger.info('等待编码 AI 启动...');
     return session;
+  }
+
+  /**
+   * 安全写入终端（进程已死时静默忽略）
+   */
+  private safeWrite(data: string): boolean {
+    if (!this.session?.isAlive()) {
+      logger.warn('终端会话已断开，跳过写入');
+      return false;
+    }
+    this.session.write(data);
+    return true;
+  }
+
+  /**
+   * 安全等待（中途检测 session 存活状态）
+   */
+  private async safeSleep(ms: number): Promise<void> {
+    if (!this.session) return;
+    await this.session.input.sleep(ms);
   }
 
   /**
@@ -520,6 +566,14 @@ export class Orchestrator {
   private async saveProjectReadme(): Promise<void> {
     const readmePath = join(this.opts.workingDir, 'README.md');
 
+    // modify 模式下已有 README 不覆盖
+    if (this.opts.projectContext?.mode === 'modify') {
+      if (existsSync(readmePath)) {
+        logger.info('modify 模式，跳过 README 生成（已有文档）');
+        return;
+      }
+    }
+
     // 如果已有 README.md 且内容充实，不覆盖
     if (existsSync(readmePath)) {
       try {
@@ -531,10 +585,10 @@ export class Orchestrator {
     logger.info(chalk.cyan('📝 生成项目使用文档...'));
 
     try {
-      const fileTree = this.getProjectFileTree();
-      const packageJson = this.readProjectPackageJson();
-      const configFiles = this.readProjectConfigFiles();
-      const sourceFiles = this.readProjectSourceFiles();
+      const fileTree = ProjectScanner.scanFileTree(this.opts.workingDir, 3);
+      const packageJson = ProjectScanner.scanPackageJson(this.opts.workingDir);
+      const configFiles = ProjectScanner.scanConfigFiles(this.opts.workingDir);
+      const sourceFiles = ProjectScanner.scanSourceFiles(this.opts.workingDir);
 
       const readmeContent = await this.llm.chat({
         system: PROJECT_README_PROMPT,
@@ -559,105 +613,6 @@ export class Orchestrator {
     }
   }
 
-  /**
-   * 读取项目源代码文件内容（用于生成 README）
-   */
-  private readProjectSourceFiles(): string {
-    const extensions = ['.js', '.ts', '.py', '.rs', '.go', '.java', '.html'];
-    const maxFileSize = 3000;
-    let result = '';
-
-    const walk = (dir: string, depth: number) => {
-      if (depth <= 0 || !existsSync(dir)) return;
-      try {
-        for (const e of readdirSync(dir, { withFileTypes: true })) {
-          if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === 'dist' || e.name === '.aimanager') continue;
-          const fullPath = join(dir, e.name);
-          if (e.isFile() && extensions.some(ext => e.name.endsWith(ext))) {
-            try {
-              const content = readFileSync(fullPath, 'utf-8');
-              if (content.length <= maxFileSize) {
-                result += `\n### ${e.name}\n\`\`\`\n${content}\n\`\`\`\n`;
-              } else {
-                result += `\n### ${e.name}\n\`\`\`\n${content.slice(0, maxFileSize)}\n// ... (truncated)\n\`\`\`\n`;
-              }
-            } catch { /* 忽略 */ }
-          } else if (e.isDirectory()) {
-            walk(fullPath, depth - 1);
-          }
-        }
-      } catch { /* 忽略 */ }
-    };
-
-    walk(this.opts.workingDir, 3);
-    return result || '(无源代码文件)';
-  }
-
-  /**
-   * 获取项目文件树（用于生成 README）
-   */
-  private getProjectFileTree(maxDepth = 3): string {
-    const walk = (dir: string, depth: number, prefix: string): string => {
-      if (depth <= 0 || !existsSync(dir)) return '';
-      try {
-        const entries = readdirSync(dir, { withFileTypes: true })
-          .filter(e => !e.name.startsWith('.') && e.name !== 'node_modules' && e.name !== 'dist' && e.name !== '.aimanager')
-          .slice(0, 30);
-        let result = '';
-        for (const entry of entries) {
-          const fullPath = join(dir, entry.name);
-          result += `${prefix}${entry.name}${entry.isDirectory() ? '/' : ''}\n`;
-          if (entry.isDirectory()) {
-            result += walk(fullPath, depth - 1, prefix + '  ');
-          }
-        }
-        return result;
-      } catch { return ''; }
-    };
-    return walk(this.opts.workingDir, maxDepth, '');
-  }
-
-  /**
-   * 读取项目的 package.json
-   */
-  private readProjectPackageJson(): string {
-    const pkgPath = join(this.opts.workingDir, 'package.json');
-    if (!existsSync(pkgPath)) return '(无 package.json)';
-    try {
-      const raw = readFileSync(pkgPath, 'utf-8');
-      const pkg = JSON.parse(raw);
-      // 只保留关键字段，避免输出过大
-      const filtered = {
-        name: pkg.name,
-        version: pkg.version,
-        description: pkg.description,
-        scripts: pkg.scripts,
-        dependencies: pkg.dependencies,
-        devDependencies: pkg.devDependencies,
-        bin: pkg.bin,
-        main: pkg.main,
-      };
-      return JSON.stringify(filtered, null, 2);
-    } catch { return '(无法解析 package.json)'; }
-  }
-
-  /**
-   * 读取项目的配置文件（tsconfig, pyproject 等）
-   */
-  private readProjectConfigFiles(): string {
-    const configNames = ['tsconfig.json', 'pyproject.toml', 'Cargo.toml', 'go.mod', 'requirements.txt', 'config.json'];
-    let result = '';
-    for (const name of configNames) {
-      const path = join(this.opts.workingDir, name);
-      if (existsSync(path)) {
-        try {
-          const content = readFileSync(path, 'utf-8');
-          result += `\n### ${name}\n\`\`\`\n${content.slice(0, 1500)}\n\`\`\`\n`;
-        } catch { /* 忽略 */ }
-      }
-    }
-    return result || '(无配置文件)';
-  }
 }
 
 const PROJECT_README_PROMPT = `CRITICAL: Output ONLY the raw Markdown content of a README.md file. No explanation, no questions, no conversation. Start directly with # title.

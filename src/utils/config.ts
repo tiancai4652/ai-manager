@@ -53,8 +53,13 @@ export function loadConfig(): Config {
   const envApiKey = process.env.ANTHROPIC_API_KEY;
 
   if (existsSync(CONFIG_FILE)) {
-    const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
-    cachedConfig = { ...ConfigSchema.parse(raw), apiKey: envApiKey ?? raw.apiKey };
+    try {
+      const raw = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'));
+      cachedConfig = { ...ConfigSchema.parse(raw), apiKey: envApiKey ?? raw.apiKey };
+    } catch (err) {
+      console.warn(`⚠️ 配置文件解析失败，使用默认配置: ${err instanceof Error ? err.message : err}`);
+      cachedConfig = { ...DEFAULT_CONFIG, apiKey: envApiKey };
+    }
   } else {
     cachedConfig = { ...DEFAULT_CONFIG, apiKey: envApiKey };
   }
