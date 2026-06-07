@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.0 (2026-06-07)
+
+### 新功能
+
+- **快速状态预判** — 正则零 token 预判 working/completed/idle 状态，高置信度时跳过 LLM 调用（减少 33% 输出分析调用）
+  - Claude Code spinner 动画词检测（Shimmying/Gusting/Actualizing 等）
+  - 完成检测：Cogitated for Ns + 回到提示符 / wrote/created 文件
+  - 空闲检测：连续 3+ 空提示符
+- **断点续跑 `aimanager resume`** — 从中断处恢复执行
+  - 运行状态自动保存到 `.aimanager/state.json`
+  - 每个任务完成后保存进度 + 每 3 个分析周期定期保存
+  - 跳过已完成任务，重置失败任务允许重试
+  - 支持多个可恢复运行交互选择
+- **智能退避** — 连续 working 时加大分析间隔（3s → 5s → 8s），状态变化立刻回退
+- **零 token 快速确认** — Y/N 提示本地正则匹配直接回复，跳过 LLM
+- **`aimanager` 全局命令** — npm link 后直接用 `aimanager` 命令
+
+### 实测数据
+
+| 任务 | 用时 | LLM 调用 | Token | 快速预判 |
+|------|------|---------|-------|---------|
+| hello world | 60s | 9 | 4.5K | - |
+| HTTP 服务器 | 1m48s | 8 | 4.4K | 5 次命中 |
+| Express+SQLite (5 tasks) | 8m53s | 23 | 18.3K | 多次命中 |
+| 断点续跑 (4 tasks, 中断后恢复) | - | - | - | ✅ 跳过已完成任务 |
+
+---
+
 ## v0.2.0 (2026-06-07)
 
 ### 新功能

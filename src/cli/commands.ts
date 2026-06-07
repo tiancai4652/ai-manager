@@ -120,7 +120,7 @@ export function createProgram(): Command {
   program
     .name('aimanager')
     .description('AI coding agent orchestrator — 自主管理编码 AI 完成复杂任务')
-    .version('0.2.0');
+    .version('0.3.0');
 
   // 主命令: run
   program
