@@ -284,6 +284,20 @@ export class Orchestrator {
       }
       this.lastAnalyzedChangeToken = currentToken;
 
+      // 快速路径：扫描 Y/N 确认提示（零 token，跳过整个 LLM 分析）
+      const quickInput = this.session?.output?.scanQuickConfirmation();
+      if (quickInput) {
+        logger.info(chalk.blue(`  → 快速确认: ${quickInput}`));
+        this.execLog.info(`零 token 快速确认: ${quickInput}`);
+        this.emitProgress('executing', task, { brainActivity: `⚡ 快速确认: ${quickInput}` });
+        this.safeWrite(quickInput);
+        await this.safeSleep(300);
+        this.safeWrite('\r');
+        await this.safeSleep(3000);
+        consecutiveIdle = 0;
+        continue;
+      }
+
       // 分析终端输出（大脑 LLM）
       this.llm.setPurpose('输出分析');
       const analysis = await this.analyzeOutput(task);

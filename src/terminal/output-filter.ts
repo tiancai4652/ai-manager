@@ -36,7 +36,7 @@ export class OutputFilter {
     // 完成 & 状态
     /\b(complete|success|done|finished|ready|✓|✔|✅|created|wrote)\b/i,
     // 等待输入
-    /\b(waiting|prompt|input|\[y\/n\]|y\/N|\?\s*$)\b/i,
+    /\b(waiting|prompt|input|\[y\/n\]|y\/N|\?\s*$|proceed|confirm|accept)\b/i,
     // 测试结果
     /\b(passed|PASS|FAIL|SKIPPED|tests?\s*(pass|fail))\b/i,
     // 构建 & 编译

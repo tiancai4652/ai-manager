@@ -79,6 +79,34 @@ export class OutputBuffer {
     return null;
   }
 
+  /**
+   * 快速扫描常见的 Y/N 确认提示（零 token 预判）
+   *
+   * 检测编码 AI 末尾是否在等待一个简单的 Y/N 确认。
+   * 如果匹配，返回建议的输入内容（如 'y'）；
+   * 如果不匹配或不确定，返回 null（交给大脑 LLM 处理）。
+   */
+  scanQuickConfirmation(): string | null {
+    const lastLines = this.getRecentLines(8);
+
+    // Claude Code 的 plan 确认: "Do you want to proceed? [Y/n]"
+    // 通用 Y/N 提示: "[Y/n]", "[y/N]", "(Y/n)", "(y/N)"
+    // 以及 "Proceed?", "Confirm?", "Accept?"
+    if (/\[Y\/n\]|\(Y\/n\)|proceed\?|confirm\?|accept\?/i.test(lastLines)) {
+      return 'y';
+    }
+    // 默认 No 的情况: "[y/N]" — 仍然回复 y（自动化场景下倾向于继续）
+    if (/\[y\/N\]|\(y\/N\)/i.test(lastLines)) {
+      return 'y';
+    }
+    // "Press Y to continue" 类型
+    if (/press\s+Y\s+to\s+(continue|proceed)/i.test(lastLines)) {
+      return 'y';
+    }
+
+    return null;
+  }
+
   /** 清空缓冲区 */
   clear(): void {
     this.rawChunks = [];
