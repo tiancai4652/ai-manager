@@ -205,11 +205,13 @@ node dist/index.js run --req-doc ./requirements.md --dir /path/to/project
 
 🚀 启动编码 AI 终端会话...
 
-🔄 执行中 — 1/5 完成 — 45s
+🔄 执行中 — 1/5 完成 — 45s | 🧠 8 ~3.2K tokens
+  💬 🧠 生成指令... [5] ~3.0K tokens
   │ 正在创建 TodoList.tsx...
   │ 添加删除和完成切换逻辑...
+  💬 📊 working: 正在编写组件... [6] ~3.5K tokens
 
-✅ 任务完成! 5/5 完成 — 3m 22s
+✅ 任务完成! 5/5 完成 — 3m 22s | 🧠 20 calls ~12.5K tokens
 ```
 
 按 `Ctrl+C` 可随时暂停。
@@ -301,6 +303,44 @@ node dist/index.js config get brainModel
 node dist/index.js config set maxRetries 5
 node dist/index.js config set analysisInterval 5000
 ```
+
+### `log` — 查看运行报告
+
+```bash
+# 查看最近的运行报告（自动扫描当前目录和 ai-manager-workspace）
+node dist/index.js log
+
+# 查看指定项目的运行报告
+node dist/index.js log ./my-project
+
+# 显示每次 LLM 调用明细
+node dist/index.js log -v
+```
+
+报告示例：
+
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📊 运行报告
+  📂 ./ai-manager-workspace/20260607-114036
+  🕐 2026/6/7 19:40:38
+  📋 创建一个简单的 Node.js CLI 工具...
+
+  ⏱️  总用时:     1m 38s
+  🧠 LLM 调用:   13 次
+  📊 估算 Token:  8.4K
+  ⚡ 平均耗时:    5124ms/call
+
+  按用途分类:
+    任务解析  1 calls  235 (3%) 10680ms
+    生成指令  3 calls  725 (9%) 4678ms
+    输出分析  5 calls  3.8K (45%) 5143ms
+    质量评审  3 calls  3.0K (35%) 3841ms
+    生成文档  1 calls  656 (8%) 4662ms
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+加 `-v` 可看到每次 LLM 调用的时间、用途、耗时和 token 数。
 
 ---
 
@@ -433,7 +473,9 @@ your-project/
 └── .aimanager/
     ├── requirement.md    # 需求文档（经讨论确认后的最终版）
     ├── plan.md           # 执行计划（任务拆解）
-    └── execution.log     # 执行日志（大脑交互、状态判断、指令发送）
+    ├── execution.log     # 执行日志（大脑交互、状态判断、指令发送）
+    ├── run-report.json   # 运行报告（结构化数据，token 消耗、调用明细）
+    └── run-report.md     # 运行报告（可读版，按用途分类汇总）
 ```
 
 这些文件可以加入 Git 追踪，方便团队回溯需求讨论过程。
@@ -527,7 +569,7 @@ ai-manager/
 ├── src/
 │   ├── index.ts                     # 入口
 │   ├── cli/
-│   │   └── commands.ts              # CLI 命令（run / model / config）
+│   │   └── commands.ts              # CLI 命令（run / model / config / log）
 │   ├── core/
 │   │   ├── orchestrator.ts          # 核心编排循环
 │   │   ├── task-manager.ts          # 任务管理
@@ -537,9 +579,10 @@ ai-manager/
 │   ├── terminal/
 │   │   ├── pty-session.ts           # PTY 终端封装
 │   │   ├── output-buffer.ts         # 输出缓冲
+│   │   ├── output-filter.ts         # 输出预过滤（去噪/去重/压缩测试块）
 │   │   └── input-writer.ts          # 输入注入
 │   ├── brain/
-│   │   ├── llm-client.ts            # LLM 客户端（claude-cli / api 双模式）
+│   │   ├── llm-client.ts            # LLM 客户端（claude-cli / api 双模式 + 调用记录）
 │   │   ├── output-analyzer.ts       # 输出分析
 │   │   ├── instruction-generator.ts # 指令生成（支持项目上下文注入）
 │   │   └── quality-reviewer.ts      # 质量评审
@@ -547,8 +590,14 @@ ai-manager/
 │   │   ├── plan.ts                  # 执行计划模型
 │   │   ├── task.ts                  # 任务模型
 │   │   ├── session-state.ts         # 会话状态模型
-│   │   └── project-context.ts       # 项目上下文模型（新建/修改模式）
-│   └── utils/                       # 工具函数
+│   │   ├── project-context.ts       # 项目上下文模型（新建/修改模式）
+│   │   └── llm-call-record.ts       # LLM 调用记录 + 运行报告模型
+│   └── utils/
+│       ├── execution-log.ts         # 执行日志（文本格式）
+│       ├── run-logger.ts            # 运行日志（结构化，生成报告）
+│       ├── config.ts                # 配置管理
+│       └── logger.ts                # 控制台日志
+├── tests/                           # 单元测试
 ├── dist/                            # 编译输出
 ├── package.json
 └── tsconfig.json

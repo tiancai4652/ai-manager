@@ -83,6 +83,27 @@ aimanager run "实现一个计算器" --agent codex
 aimanager run "..." --debug
 ```
 
+运行时会实时显示 LLM 交互统计：
+
+```
+🔄 执行中 — 1/3 完成 — 45s | 🧠 8 ~3.2K tokens
+  💬 🧠 生成指令... [5] ~3.0K tokens
+  💬 📊 working: 正在编写组件... [6] ~3.5K tokens
+```
+
+### 查看运行报告
+
+```bash
+# 查看最近运行报告（自动扫描目录）
+aimanager log
+
+# 显示每次 LLM 调用明细
+aimanager log -v
+
+# 指定项目目录
+aimanager log ./my-project
+```
+
 ### 配置
 
 ```bash
@@ -216,40 +237,36 @@ ai-manager/
 ├── src/
 │   ├── index.ts                   # 主入口 (CLI + --tray 模式)
 │   ├── cli/
-│   │   └── commands.ts            # AI Manager CLI 命令
+│   │   └── commands.ts            # AI Manager CLI 命令（run / model / config / log）
 │   ├── core/                      # AI 编排核心
-│   │   ├── orchestrator.ts
-│   │   ├── task-manager.ts
-│   │   └── plan-parser.ts
+│   │   ├── orchestrator.ts        # 编排器（任务循环 + LLM 调用统计）
+│   │   ├── task-manager.ts        # 任务管理
+│   │   ├── plan-parser.ts         # 需求解析
+│   │   ├── project-scanner.ts     # 项目扫描（目录树/源码签名/配置）
+│   │   └── requirement-discusser.ts
 │   ├── terminal/                  # PTY 终端控制
-│   │   ├── pty-session.ts
-│   │   ├── output-buffer.ts
-│   │   └── input-writer.ts
+│   │   ├── pty-session.ts         # PTY 会话
+│   │   ├── output-buffer.ts       # 输出缓冲
+│   │   ├── output-filter.ts       # 输出预过滤（去噪/去重/压缩）
+│   │   └── input-writer.ts        # 输入注入
 │   ├── brain/                     # LLM 大脑模块
-│   │   ├── llm-client.ts
-│   │   ├── output-analyzer.ts
-│   │   ├── instruction-generator.ts
-│   │   └── quality-reviewer.ts
-│   ├── models/                    # AI Manager 数据模型
-│   ├── utils/                     # 工具函数
-│   └── reminder/                  # ✨ CCreminer 提醒子系统
-│       ├── index.ts               # 独立 CLI 入口
-│       ├── tray.ts                # 托盘服务入口
-│       ├── models/
-│       │   └── Reminder.ts        # 提醒数据接口
-│       ├── storage/
-│       │   └── ReminderStore.ts   # JSON 文件存储
-│       ├── services/
-│       │   ├── Scheduler.ts       # 定时调度 (node-cron)
-│       │   ├── Notifier.ts        # 桌面通知 (node-notifier)
-│       │   ├── TrayService.ts     # 系统托盘 (systray2)
-│       │   └── BackgroundService.ts # 后台服务编排
-│       ├── cli/
-│       │   └── commands.ts        # 提醒 CLI 命令
-│       └── types/
-│           └── node-notifier.d.ts # 类型声明
+│   │   ├── llm-client.ts          # LLM 客户端（双模式 + 调用记录 + schema 缓存）
+│   │   ├── output-analyzer.ts     # 输出分析
+│   │   ├── instruction-generator.ts # 指令生成
+│   │   └── quality-reviewer.ts    # 质量评审
+│   ├── models/
+│   │   ├── plan.ts / task.ts / session-state.ts
+│   │   ├── project-context.ts     # 项目上下文（新建/修改模式）
+│   │   └── llm-call-record.ts     # LLM 调用记录 + 运行报告模型
+│   ├── utils/
+│   │   ├── execution-log.ts       # 执行日志（文本格式）
+│   │   ├── run-logger.ts          # 运行日志（结构化，生成 JSON/Markdown 报告）
+│   │   ├── config.ts              # 配置管理 + 模型列表
+│   │   └── logger.ts              # 控制台日志
+│   └── reminder/                  # CCreminer 提醒子系统
+├── tests/                         # 单元测试
+├── doc/                           # 文档
 ├── start.bat                      # Windows 启动脚本
-├── reminders.json                 # 提醒数据 (.gitignored)
 ├── package.json
 └── tsconfig.json
 ```

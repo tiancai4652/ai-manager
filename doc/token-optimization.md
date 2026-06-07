@@ -195,12 +195,42 @@ const recentOutput = buffer.getRecentLines(maxLines);  // 原（不过滤）
 - [x] System Prompt 英文压缩
 - [x] 源码签名模式
 - [x] NEED_HUMAN 协议精简（已在之前版本实现）
+- [x] **增量分析** — 终端输出无变化时跳过 LLM 调用（orchestrator.ts changeToken 机制）
+- [x] **Schema 缓存** — LlmClient 缓存已渲染的 schema JSON，避免重复序列化
+- [x] **Schema 精简** — stripDescriptions 递归移除 schema 中的 description 字段
+- [x] **运行日志系统** — RunLogger 记录每次 LLM 调用的耗时、字符数、估算 token，生成 run-report.json + run-report.md
+- [x] **Token 计数统计** — LlmClient 每次调用自动记录，按用途分类汇总
+- [x] **LLM 交互实时展示** — spinner 行显示累计调用次数和 token（如 `🧠 12 ~7.7K tokens`）
+
+### 端到端实测数据（2026-06-07）
+
+测试任务：创建一个 Node.js CLI 奇偶判断工具（3 个子任务）
+
+| 指标 | 实测值 |
+|------|--------|
+| 总用时 | 1m 38s |
+| LLM 调用次数 | 13 次 |
+| 估算总 Token | 8,365 |
+| 平均调用耗时 | 5,124ms |
+| 输入字符 | 26,443 |
+| 输出字符 | 2,802 |
+
+**按用途 Token 分布**：
+
+| 用途 | 调用次数 | Token | 占比 |
+|------|---------|-------|------|
+| 输出分析 | 5 | 3,792 | **45%** |
+| 质量评审 | 3 | 2,957 | **35%** |
+| 生成指令 | 3 | 725 | 9% |
+| 生成文档 | 1 | 656 | 8% |
+| 任务解析 | 1 | 235 | 3% |
+
+**结论**：输出分析和质量评审占 80% token，是进一步优化的重点方向。
 
 ### 待实施
 
 - [ ] **智能退避** — 连续 working 状态时加大分析间隔 (3s → 5s → 8s)
 - [ ] **快速状态预判** — 正则/关键词零 token 预判，确定时跳过 LLM
-- [ ] **Token 计数统计** — LlmClient 添加 usage 返回，任务级 token 追踪
 - [ ] **Prompt 缓存** — API 模式下标记 system prompt 为 cacheable
 - [ ] **动态分析行数** — working 状态取 15 行，error/completed 取 40 行
 - [ ] **语义搜索** — 对大型项目用 embedding 做精准代码定位（参考 claude-context）
