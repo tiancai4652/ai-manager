@@ -371,6 +371,11 @@ export class Orchestrator {
 
       logger.debug(`  状态: ${analysis.state} — ${analysis.summary}`);
 
+      // 定期保存状态（每 3 个 LLM 分析周期保存一次，防止强杀丢失进度）
+      if (cycle % 3 === 0) {
+        this.saveState('running');
+      }
+
       shouldReturn = false;
 
       switch (analysis.state) {
