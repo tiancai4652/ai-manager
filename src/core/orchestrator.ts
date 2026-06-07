@@ -7,6 +7,7 @@ import { TaskManager } from './task-manager.js';
 import { ProjectScanner } from './project-scanner.js';
 import { LlmClient } from '../brain/llm-client.js';
 import { OutputFilter } from '../terminal/output-filter.js';
+import { RunLogger } from '../utils/run-logger.js';
 import type { Plan } from '../models/plan.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { Task } from '../models/task.js';
@@ -60,6 +61,8 @@ export interface ProgressInfo {
   elapsedMs: number;
   /** 大脑交互信息（实时显示用） */
   brainActivity?: string;
+  /** LLM 调用统计（实时显示用） */
+  llmStats?: { totalCalls: number; totalTokens: number };
 }
 
 /**
@@ -84,11 +87,16 @@ export class Orchestrator {
   private lastAnalyzedChangeToken = -1;
   /** 预渲染的项目上下文字符串，一次编排中不变 */
   private cachedContextBlock = '';
+  /** 运行日志记录器（累积 LLM 调用记录） */
+  private runLogger: RunLogger;
 
   constructor(opts: OrchestratorOptions) {
     this.opts = opts;
     this.execLog = new ExecutionLog(opts.workingDir);
+    this.runLogger = new RunLogger(opts.workingDir);
     this.llm = new LlmClient(opts.brainModel);
+    // 注入调用记录器，每次 LLM 调用自动记录
+    this.llm.setRecorder(rec => this.runLogger.record(rec));
     this.planParser = new PlanParser(this.llm);
     this.taskManager = new TaskManager();
     this.outputAnalyzer = new OutputAnalyzer(this.llm);
@@ -114,6 +122,7 @@ export class Orchestrator {
         this.taskManager.createTasks(this.opts.preParsedTasks);
       } else {
         logger.info(chalk.cyan('🎯 开始解析需求...'));
+        this.llm.setPurpose('任务解析');
         const parsed = await this.planParser.parse(this.opts.requirement, this.opts.workingDir, this.opts.projectContext);
         this.taskManager.createTasks(parsed.tasks);
       }
@@ -159,6 +168,15 @@ export class Orchestrator {
         await this.saveProjectReadme();
       }
 
+      // Phase 6: 写运行报告
+      if (this.plan) {
+        this.runLogger.writeReport({
+          requirement: this.opts.requirement,
+          startedAt: new Date(this.startTime),
+          completedAt: new Date(),
+        });
+      }
+
       this.session?.kill();
 
       const summary = this.taskManager.getProgressSummary();
@@ -190,6 +208,13 @@ export class Orchestrator {
   }
 
   /**
+   * 获取运行中的 LLM 调用统计（给外部显示用）
+   */
+  getRunStats(): { totalCalls: number; totalTokens: number } {
+    return this.runLogger.getStats();
+  }
+
+  /**
    * 执行单个任务
    */
   private async executeTask(task: Task): Promise<void> {
@@ -199,6 +224,7 @@ export class Orchestrator {
     this.lastAnalyzedChangeToken = -1;
 
     // 生成初始指令
+    this.llm.setPurpose('生成指令');
     this.execLog.brainCall('生成指令', task.title);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成指令...' });
     const instruction = await this.instructionGenerator.generateInitialInstruction(task, this.cachedContextBlock);
@@ -259,6 +285,7 @@ export class Orchestrator {
       this.lastAnalyzedChangeToken = currentToken;
 
       // 分析终端输出（大脑 LLM）
+      this.llm.setPurpose('输出分析');
       const analysis = await this.analyzeOutput(task);
       this.execLog.stateJudgment(analysis.state, analysis.summary);
       this.emitProgress('executing', task, {
@@ -356,6 +383,7 @@ export class Orchestrator {
     if (analysis.suggestedInput) {
       instruction = { content: analysis.suggestedInput, waitFor: 3000 };
     } else {
+      this.llm.setPurpose('生成响应');
       this.execLog.brainCall('生成响应', `等待输入: ${analysis.summary}`);
       this.emitProgress('executing', task, { brainActivity: '🧠 生成响应输入...' });
       instruction = await this.instructionGenerator.generateResponse({
@@ -402,6 +430,7 @@ export class Orchestrator {
     const recentOutput = OutputFilter.compressLight(
       this.session?.output?.getRecentLines(30) ?? ''
     );
+    this.llm.setPurpose('错误恢复');
     this.execLog.brainCall('错误恢复', analysis.summary);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成错误修复...' });
     const instruction = await this.instructionGenerator.generateResponse({
@@ -426,6 +455,7 @@ export class Orchestrator {
    * 返回 true 表示需要重新进入监控循环（修复指令已发送）
    */
   private async handleCompleted(task: Task): Promise<boolean> {
+    this.llm.setPurpose('质量评审');
     this.emitProgress('reviewing', task, { brainActivity: '🔍 质量评审中...' });
     logger.info(chalk.cyan('  🔍 质量评审中...'));
 
@@ -453,6 +483,7 @@ export class Orchestrator {
       }
 
       this.execLog.brainCall('生成修复', review.issues.join('; '));
+      this.llm.setPurpose('生成修复');
       this.emitProgress('executing', task, { brainActivity: '🧠 生成修复指令...' });
       const fixInstruction = await this.instructionGenerator.generateFixInstruction({
         task,
@@ -553,6 +584,7 @@ export class Orchestrator {
     task?: Task,
     info?: { terminalPreview?: string; brainActivity?: string },
   ): void {
+    const stats = this.runLogger.getStats();
     this.opts.onProgress?.({
       phase,
       currentTask: task,
@@ -560,6 +592,7 @@ export class Orchestrator {
       terminalPreview: info?.terminalPreview ?? this.session?.output.getRecentLines(5) ?? '',
       elapsedMs: Date.now() - this.startTime,
       brainActivity: info?.brainActivity,
+      llmStats: stats.totalCalls > 0 ? stats : undefined,
     });
   }
 
@@ -635,6 +668,7 @@ export class Orchestrator {
     logger.info(chalk.cyan('📝 生成项目使用文档...'));
 
     try {
+      this.llm.setPurpose('生成文档');
       const fileTree = ProjectScanner.scanFileTree(this.opts.workingDir, 3);
       const packageJson = ProjectScanner.scanPackageJson(this.opts.workingDir);
       const configFiles = ProjectScanner.scanConfigFiles(this.opts.workingDir);

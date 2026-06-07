@@ -2,6 +2,7 @@ import { execSync, spawnSync } from 'node:child_process';
 import Anthropic from '@anthropic-ai/sdk';
 import { loadConfig } from '../utils/config.js';
 import { logger } from '../utils/logger.js';
+import type { LLMCallRecord } from '../models/llm-call-record.js';
 
 /**
  * "大脑"调用方式
@@ -22,11 +23,26 @@ export class LlmClient {
   private apiClient: Anthropic | null = null;
   private model: string;
 
+  /** 调用记录回调（由 RunLogger 注入） */
+  private recorder?: (record: LLMCallRecord) => void;
+  /** 当前调用用途（由 Orchestrator 在每次逻辑操作前设置） */
+  private currentPurpose = '';
+
   constructor(modelOverride?: string) {
     const config = loadConfig();
     this.model = modelOverride ?? config.brainModel;
     this.mode = this.resolveMode(config.brainMode, config.apiKey);
     logger.info(`大脑调用方式: ${this.mode}, 模型: ${this.model}`);
+  }
+
+  /** 注入调用记录器 */
+  setRecorder(recorder: (record: LLMCallRecord) => void): void {
+    this.recorder = recorder;
+  }
+
+  /** 设置下一次调用的用途（在发起 LLM 调用前设置） */
+  setPurpose(purpose: string): void {
+    this.currentPurpose = purpose;
   }
 
   /**
@@ -104,12 +120,50 @@ export class LlmClient {
     temperature?: number;
   }): Promise<string> {
     const { system, user } = params;
+    const purpose = this.currentPurpose || 'chat';
+    const inputChars = system.length + user.length;
+    const start = Date.now();
+
     logger.debug(`LLM request (${this.mode}): ${user.slice(0, 100)}...`);
 
-    if (this.mode === 'claude-cli') {
-      return this.chatViaCli(system, user);
+    try {
+      let result: string;
+      if (this.mode === 'claude-cli') {
+        result = this.chatViaCli(system, user);
+      } else {
+        result = await this.chatViaApi(params);
+      }
+
+      this.recordCall({
+        timestamp: new Date().toISOString(),
+        type: 'chat',
+        purpose,
+        model: this.model,
+        mode: this.mode,
+        durationMs: Date.now() - start,
+        inputChars,
+        outputChars: result.length,
+        estimatedTokens: LlmClient.estimateTokens(inputChars, result.length),
+        success: true,
+      });
+
+      return result;
+    } catch (err) {
+      this.recordCall({
+        timestamp: new Date().toISOString(),
+        type: 'chat',
+        purpose,
+        model: this.model,
+        mode: this.mode,
+        durationMs: Date.now() - start,
+        inputChars,
+        outputChars: 0,
+        estimatedTokens: LlmClient.estimateTokens(inputChars, 0),
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     }
-    return this.chatViaApi(params);
   }
 
   /**
@@ -126,12 +180,51 @@ export class LlmClient {
     maxTokens?: number;
   }): Promise<T> {
     const { system, user, schemaName, schema } = params;
+    const purpose = this.currentPurpose || schemaName;
+    const inputChars = system.length + user.length;
+    const start = Date.now();
+
     logger.debug(`LLM JSON request (${this.mode}, ${schemaName}): ${user.slice(0, 100)}...`);
 
-    if (this.mode === 'claude-cli') {
-      return this.chatJsonViaCli<T>(system, user, schemaName, schema);
+    try {
+      let result: T;
+      if (this.mode === 'claude-cli') {
+        result = this.chatJsonViaCli<T>(system, user, schemaName, schema);
+      } else {
+        result = await this.chatJsonViaApi<T>(params);
+      }
+
+      const outputStr = JSON.stringify(result);
+      this.recordCall({
+        timestamp: new Date().toISOString(),
+        type: 'chatJson',
+        purpose,
+        model: this.model,
+        mode: this.mode,
+        durationMs: Date.now() - start,
+        inputChars,
+        outputChars: outputStr.length,
+        estimatedTokens: LlmClient.estimateTokens(inputChars, outputStr.length),
+        success: true,
+      });
+
+      return result;
+    } catch (err) {
+      this.recordCall({
+        timestamp: new Date().toISOString(),
+        type: 'chatJson',
+        purpose,
+        model: this.model,
+        mode: this.mode,
+        durationMs: Date.now() - start,
+        inputChars,
+        outputChars: 0,
+        estimatedTokens: LlmClient.estimateTokens(inputChars, 0),
+        success: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
     }
-    return this.chatJsonViaApi<T>(params);
   }
 
   // ── claude-cli 模式实现 ──
@@ -399,5 +492,20 @@ export class LlmClient {
       }
     }
     return null; // 没有配对的 }
+  }
+
+  // ─── 调用记录辅助 ────────────────────────────────────
+
+  /** 发送调用记录到 recorder */
+  private recordCall(record: LLMCallRecord): void {
+    this.recorder?.(record);
+  }
+
+  /**
+   * 估算 token 数（混合内容：英文/代码 ~4 字符/token，中文 ~2 字符/token）
+   * 取 3.5 作为折中值
+   */
+  private static estimateTokens(inputChars: number, outputChars: number): number {
+    return Math.ceil(inputChars / 3.5) + Math.ceil(outputChars / 3.5);
   }
 }

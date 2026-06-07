@@ -27,6 +27,7 @@ class ProgressDisplay {
     terminalPreview: string;
     elapsedMs: number;
     brainActivity?: string;
+    llmStats?: { totalCalls: number; totalTokens: number };
   }): void {
     const phaseEmoji: Record<string, string> = {
       planning: '🧠',
@@ -46,7 +47,10 @@ class ProgressDisplay {
 
     if (info.phase === 'completed' || info.phase === 'failed') {
       this.spinner?.stop();
-      console.log(`\n${emoji} ${info.phase === 'completed' ? chalk.green('完成') : chalk.red('失败')} — ${info.taskProgress} — ${elapsed}`);
+      const llmSummary = info.llmStats
+        ? ` | 🧠 ${info.llmStats.totalCalls} calls ~${this.formatTokens(info.llmStats.totalTokens)}`
+        : '';
+      console.log(`\n${emoji} ${info.phase === 'completed' ? chalk.green('完成') : chalk.red('失败')} — ${info.taskProgress} — ${elapsed}${llmSummary}`);
       return;
     }
 
@@ -58,14 +62,21 @@ class ProgressDisplay {
       this.spinner = ora({ spinner: 'dots' }).start();
     }
 
-    // 显示大脑交互信息
+    // 显示大脑交互信息（含 LLM 统计）
     if (info.brainActivity) {
       this.spinner.stop();
-      console.log(chalk.cyan(`  💬 ${info.brainActivity}`));
+      const llmTag = info.llmStats
+        ? chalk.gray(` [${info.llmStats.totalCalls}] ~${this.formatTokens(info.llmStats.totalTokens)}`)
+        : '';
+      console.log(chalk.cyan(`  💬 ${info.brainActivity}${llmTag}`));
       this.spinner = ora({ spinner: 'dots' }).start();
     }
 
-    this.spinner.text = `${emoji} ${taskInfo || info.phase} — ${info.taskProgress} — ${elapsed}`;
+    // spinner 文本含 LLM 统计
+    const llmInfo = info.llmStats
+      ? ` | 🧠 ${info.llmStats.totalCalls} ~${this.formatTokens(info.llmStats.totalTokens)}`
+      : '';
+    this.spinner.text = `${emoji} ${taskInfo || info.phase} — ${info.taskProgress} — ${elapsed}${llmInfo}`;
 
     if (info.terminalPreview && info.phase === 'executing') {
       const lines = info.terminalPreview.split('\n').filter(l => l.trim()).slice(-3);
@@ -75,7 +86,7 @@ class ProgressDisplay {
           console.log(chalk.gray(`  │ ${line.slice(0, 100)}`));
         }
         this.spinner = ora({ spinner: 'dots' }).start();
-        this.spinner.text = `${emoji} ${taskInfo || info.phase} — ${info.taskProgress} — ${elapsed}`;
+        this.spinner.text = `${emoji} ${taskInfo || info.phase} — ${info.taskProgress} — ${elapsed}${llmInfo}`;
       }
     }
   }
@@ -84,6 +95,14 @@ class ProgressDisplay {
     const s = Math.floor(ms / 1000);
     const m = Math.floor(s / 60);
     return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
+  }
+
+  /** 格式化 token 数量（如 1.2K, 15K） */
+  private formatTokens(tokens: number): string {
+    if (tokens >= 1000) {
+      return `${(tokens / 1000).toFixed(1)}K tokens`;
+    }
+    return `${tokens} tokens`;
   }
 
   stop(): void {
@@ -233,14 +252,18 @@ ${modeLabel}
         onProgress: (info) => display.update(info),
         onComplete: (plan) => {
           display.stop();
+          const stats = orchestrator.getRunStats();
+          const llmLine = stats
+            ? `🧠  LLM: ${stats.totalCalls} calls, ~${(stats.totalTokens / 1000).toFixed(1)}K tokens\n`
+            : '';
           console.log(chalk.green(`
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ✅ 所有任务已完成!
 📋 需求: ${plan.userRequirement.slice(0, 50)}
 📊 任务: ${plan.tasks.length} 个
 ⏱️  总用时: ${Math.round((Date.now() - plan.startedAt.getTime()) / 1000)}s
-📂 目录: ${plan.workingDir}
-📄 文档: ${plan.workingDir}/.aimanager/
+${llmLine}📂 目录: ${plan.workingDir}
+📄 报告: ${plan.workingDir}/.aimanager/run-report.{json,md}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `));
         },
