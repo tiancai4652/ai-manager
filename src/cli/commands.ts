@@ -1,6 +1,6 @@
 import * as readline from 'node:readline';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
 import { Command } from 'commander';
 import { Orchestrator, type OrchestratorOptions } from '../core/orchestrator.js';
 import { RequirementDiscusser } from '../core/requirement-discusser.js';
@@ -406,6 +406,26 @@ ${llmLine}📂 目录: ${plan.workingDir}
       console.log(chalk.green(`✅ 已设置模型: ${found.id} (${found.display_name})`));
     });
 
+  // ─── log 子命令 — 查看运行报告 ──────────────────────
+  program
+    .command('log')
+    .description('查看运行报告（token 消耗、耗时、调用明细）')
+    .argument('[dir]', '项目目录（默认扫描当前目录和 ai-manager-workspace）')
+    .option('-v, --verbose', '显示每次 LLM 调用明细', false)
+    .action((dir?: string, opts?: { verbose?: boolean }) => {
+      const reports = findRunReports(dir);
+
+      if (reports.length === 0) {
+        console.log(chalk.yellow('未找到运行报告。'));
+        console.log(chalk.gray('  提示: 在项目目录下运行，或指定目录 aimanager log ./my-project'));
+        return;
+      }
+
+      for (const { path, report } of reports) {
+        displayRunReport(path, report, opts?.verbose ?? false);
+      }
+    });
+
   // ─── reminder 子系统命令 ────────────────────────────
   registerReminderCommands(program);
 
@@ -588,4 +608,163 @@ function promptChoice(message: string, max: number): Promise<number | null> {
       resolve(num);
     });
   });
+}
+
+// ─── log 命令辅助 ──────────────────────────────────────
+
+interface RunReportLike {
+  requirement?: string;
+  startedAt?: string;
+  completedAt?: string;
+  totalDurationMs?: number;
+  summary?: {
+    totalCalls: number;
+    totalEstimatedTokens: number;
+    totalInputChars: number;
+    totalOutputChars: number;
+    avgCallDurationMs: number;
+    byPurpose: Record<string, { calls: number; tokens: number; avgMs: number }>;
+  };
+  llmCalls?: Array<{
+    timestamp: string;
+    purpose: string;
+    type: string;
+    durationMs: number;
+    inputChars: number;
+    outputChars: number;
+    estimatedTokens: number;
+    success: boolean;
+  }>;
+}
+
+/**
+ * 扫描目录查找运行报告
+ */
+function findRunReports(dir?: string): Array<{ path: string; report: RunReportLike }> {
+  const results: Array<{ path: string; report: RunReportLike }> = [];
+
+  const scanDir = (base: string) => {
+    // 直接找 .aimanager/run-report.json
+    const reportPath = join(base, '.aimanager', 'run-report.json');
+    if (existsSync(reportPath)) {
+      try {
+        const raw = JSON.parse(readFileSync(reportPath, 'utf-8'));
+        results.push({ path: base, report: raw });
+      } catch { /* 忽略损坏的报告 */ }
+    }
+
+    // 扫描子目录中的 workspace
+    try {
+      const entries = readdirSync(base, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          const subReport = join(base, entry.name, '.aimanager', 'run-report.json');
+          if (existsSync(subReport)) {
+            try {
+              const raw = JSON.parse(readFileSync(subReport, 'utf-8'));
+              results.push({ path: join(base, entry.name), report: raw });
+            } catch { /* 忽略 */ }
+          }
+        }
+      }
+    } catch { /* 忽略无权限目录 */ }
+  };
+
+  if (dir) {
+    scanDir(resolve(dir));
+  } else {
+    // 默认扫描当前目录和 ai-manager-workspace
+    scanDir('.');
+    const wsDir = resolve('ai-manager-workspace');
+    if (existsSync(wsDir)) {
+      scanDir(wsDir);
+    }
+  }
+
+  // 按时间倒序（最新的在前）
+  results.sort((a, b) => {
+    const ta = a.report.startedAt ?? '';
+    const tb = b.report.startedAt ?? '';
+    return tb.localeCompare(ta);
+  });
+
+  return results;
+}
+
+/**
+ * 格式化 token 数量
+ */
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+/**
+ * 展示运行报告
+ */
+function displayRunReport(dirPath: string, report: RunReportLike, verbose: boolean): void {
+  const s = report.summary;
+  if (!s) {
+    console.log(chalk.yellow(`⚠️ ${dirPath} — 报告无 summary 数据`));
+    return;
+  }
+
+  const dur = report.totalDurationMs ? Math.round(report.totalDurationMs / 1000) : 0;
+  const timeStr = report.startedAt
+    ? new Date(report.startedAt).toLocaleString('zh-CN')
+    : '未知';
+
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log(chalk.cyan(`📊 运行报告`));
+  console.log(chalk.gray(`  📂 ${dirPath}`));
+  console.log(chalk.gray(`  🕐 ${timeStr}`));
+  if (report.requirement) {
+    console.log(chalk.gray(`  📋 ${report.requirement.slice(0, 60)}${report.requirement.length > 60 ? '...' : ''}`));
+  }
+  console.log('');
+  console.log(`  ⏱️  总用时:     ${chalk.white(Math.floor(dur / 60))}m ${dur % 60}s`);
+  console.log(`  🧠 LLM 调用:   ${chalk.white(s.totalCalls)} 次`);
+  console.log(`  📊 估算 Token:  ${chalk.white(fmtTokens(s.totalEstimatedTokens))}`);
+  console.log(`  ⚡ 平均耗时:    ${chalk.white(s.avgCallDurationMs)}ms/call`);
+  console.log(`  📥 输入字符:    ${chalk.white(s.totalInputChars.toLocaleString())}`);
+  console.log(`  📤 输出字符:    ${chalk.white(s.totalOutputChars.toLocaleString())}`);
+
+  // 按用途分类
+  if (Object.keys(s.byPurpose).length > 0) {
+    console.log('');
+    console.log(chalk.cyan('  按用途分类:'));
+    const maxPurposeLen = Math.max(...Object.keys(s.byPurpose).map(k => k.length));
+    for (const [purpose, stats] of Object.entries(s.byPurpose)) {
+      const pct = s.totalEstimatedTokens > 0
+        ? Math.round(stats.tokens / s.totalEstimatedTokens * 100)
+        : 0;
+      const bar = '█'.repeat(Math.round(pct / 5)) + '░'.repeat(20 - Math.round(pct / 5));
+      console.log(
+        `    ${chalk.white(purpose.padEnd(maxPurposeLen))}  `
+        + `${chalk.gray(stats.calls + ' calls')}  `
+        + `${chalk.green(fmtTokens(stats.tokens))} `
+        + `${chalk.gray(`(${pct}%)`)} `
+        + `${chalk.gray(stats.avgMs + 'ms')}`,
+      );
+    }
+  }
+
+  // 明细模式
+  if (verbose && report.llmCalls && report.llmCalls.length > 0) {
+    console.log('');
+    console.log(chalk.cyan('  调用明细:'));
+    report.llmCalls.forEach((call, i) => {
+      const time = call.timestamp.slice(11, 19);
+      const ok = call.success ? chalk.green('✓') : chalk.red('✗');
+      console.log(
+        `    ${chalk.gray(`#${String(i + 1).padStart(2)} ${time}`)} `
+        + `${ok} ${chalk.white(call.purpose.padEnd(8))} `
+        + `${chalk.gray(call.type.padEnd(8))} `
+        + `${call.durationMs}ms `
+        + `${chalk.cyan(fmtTokens(call.estimatedTokens) + ' tokens')}`,
+      );
+    });
+  }
+
+  console.log(chalk.cyan('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━'));
+  console.log('');
 }
