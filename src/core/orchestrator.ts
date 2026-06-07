@@ -305,6 +305,43 @@ export class Orchestrator {
         continue;
       }
 
+      // 快速路径：正则预判状态（零 token，跳过 LLM 分析）
+      let shouldReturn = false;
+      const quickState = this.session?.output?.scanQuickState();
+      if (quickState) {
+        logger.debug(`  ⚡ 快速预判: ${quickState}（跳过 LLM）`);
+        this.execLog.info(`零 token 状态预判: ${quickState}`);
+
+        switch (quickState) {
+          case 'working':
+            consecutiveIdle = 0;
+            consecutiveWorking++;
+            break;
+          case 'completed':
+            consecutiveIdle = 0;
+            consecutiveWorking = 0;
+            // completed 仍走 LLM 质量评审，但跳过输出分析
+            // 注意：这里只是标记 completed，下一轮会由 LLM 确认或直接进入 idle 检测
+            break;
+          case 'idle':
+            consecutiveIdle++;
+            consecutiveWorking = 0;
+            if (consecutiveIdle >= maxIdle) {
+              logger.info('  终端空闲（快速预判），检查任务是否完成...');
+              this.execLog.info(`任务 ${task.title} 连续 ${maxIdle} 次 idle（预判），进行最终评审`);
+              shouldReturn = !(await this.handleCompleted(task));
+              if (shouldReturn) return;
+              consecutiveIdle = 0;
+            }
+            break;
+        }
+
+        this.emitProgress('executing', task, {
+          brainActivity: `⚡ 预判: ${quickState}`,
+        });
+        continue;
+      }
+
       // 分析终端输出（大脑 LLM）
       this.llm.setPurpose('输出分析');
       const analysis = await this.analyzeOutput(task);
@@ -315,7 +352,7 @@ export class Orchestrator {
 
       logger.debug(`  状态: ${analysis.state} — ${analysis.summary}`);
 
-      let shouldReturn = false;
+      shouldReturn = false;
 
       switch (analysis.state) {
         case 'working':
