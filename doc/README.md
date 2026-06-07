@@ -93,6 +93,47 @@ node dist/index.js run "用 Express + TypeScript 创建 REST API" -y
 node dist/index.js run "..." --debug
 ```
 
+### 修改已有项目
+
+当 `--dir` 指向已有项目时，AI Manager 自动进入 **修改模式**，扫描项目结构和源代码，让 LLM 精准定位到现有代码做修改：
+
+```bash
+# 指向已有项目 → 自动检测，进入修改模式
+node dist/index.js run "给登录接口加上验证码" --dir /path/to/existing-project
+
+# 你会看到：
+# 📂 检测到已有项目 (18 项)
+# 🔧 修改模式：在已有项目上工作
+```
+
+修改模式下，AI Manager 会：
+- **扫描项目上下文**：目录树、package.json、配置文件、关键源码、已有 README
+- **精准规划任务**：LLM 知道项目结构，生成的任务是"修改 routes/auth.ts 的 POST /login"而不是"初始化项目"
+- **精准生成指令**：指令引用实际文件路径和代码位置，而非从零开始
+- **保护已有文档**：不会覆盖已有的 README.md
+
+### 三种需求输入方式
+
+除了命令行参数，还支持交互式输入和需求文档：
+
+```bash
+# 方式 1: 命令行直接写（适合简短需求）
+node dist/index.js run "给 CLI 添加一个 version 命令" --dir /path/to/project
+
+# 方式 2: 先进项目，再聊需求（推荐）
+#         不写 requirement 参数，会弹出交互式输入框
+node dist/index.js run --dir /path/to/project
+# → 💬 请描述你的需求
+# → 📂 项目: /path/to/project
+# → 📦 项目名: my-project
+# → 输入需求描述，支持多行。连续两次回车结束输入。
+# → >
+
+# 方式 3: 甩需求文档（适合复杂需求）
+node dist/index.js run --req-doc ./requirements.md --dir /path/to/project
+# → 📄 已加载需求文档: requirements.md (1234 字)
+```
+
 ### 你会看到什么
 
 运行 `aimanager run "做一个 Todo App"` 后，AI Manager **不会马上开始写代码**，而是先和你讨论需求：
@@ -180,15 +221,16 @@ node dist/index.js run "..." --debug
 ### `run` — 执行任务
 
 ```bash
-node dist/index.js run <requirement> [选项]
+node dist/index.js run [requirement] [选项]
 ```
 
 | 参数 | 说明 |
 |------|------|
-| `<requirement>` | **必填**。你的需求描述，可以很粗略，会引导你细化 |
-| `-d, --dir <path>` | 工作目录。未指定时自动创建 `./ai-manager-workspace/<时间戳>` |
+| `[requirement]` | **可选**。需求描述，可以很粗略。不提供则交互式输入 |
+| `-d, --dir <path>` | 工作目录。指向已有项目时自动进入修改模式；未指定时新建 |
 | `-a, --agent <type>` | 编码 AI 类型：`claude-code`（默认）或 `codex` |
 | `-m, --model <model>` | 大脑 LLM 模型，如 `claude-sonnet-4-20250514`、`claude-opus-4-8` |
+| `-r, --req-doc <path>` | 需求文档路径（`.md` / `.txt`），适合复杂需求 |
 | `-y, --yes` | 跳过需求讨论和计划确认，直接开始执行 |
 | `--debug` | 调试模式，显示详细日志 |
 
@@ -370,8 +412,9 @@ node dist/index.js config set analysisInterval 5000
 
 ### Q: 默认工作目录是什么？
 
-- **指定了 `--dir`**：使用你指定的目录
-- **未指定**：自动在当前目录下创建 `./ai-manager-workspace/<时间戳>`（如 `./ai-manager-workspace/20260604-093000`）
+- **指定了 `--dir` 且目录有文件**：使用你指定的目录，自动进入 **修改模式**
+- **指定了 `--dir` 但目录为空/不存在**：使用你指定的目录，进入 **新建模式**
+- **未指定**：自动在当前目录下创建 `./ai-manager-workspace/<时间戳>`（如 `./ai-manager-workspace/20260604-093000`），进入新建模式
 
 所有生成的文件（代码、需求文档、执行计划）都在这个目录下。建议每次都用 `--dir` 指定明确的项目目录。
 
@@ -389,10 +432,22 @@ AI Manager 自动处理。启动 Claude Code 时会加上 `--dangerously-skip-pe
 your-project/
 └── .aimanager/
     ├── requirement.md    # 需求文档（经讨论确认后的最终版）
-    └── plan.md           # 执行计划（任务拆解）
+    ├── plan.md           # 执行计划（任务拆解）
+    └── execution.log     # 执行日志（大脑交互、状态判断、指令发送）
 ```
 
 这些文件可以加入 Git 追踪，方便团队回溯需求讨论过程。
+
+### Q: 修改已有项目和新建项目有什么区别？
+
+| | 新建模式 | 修改模式 |
+|--|---------|---------|
+| **触发条件** | 目录为空/不存在，或未指定 `--dir` | `--dir` 指向有文件的目录 |
+| **项目扫描** | 不扫描 | 扫描目录树、package.json、配置文件、源码、README |
+| **需求讨论** | 通用问题（技术栈？功能？） | 针对性问题（"已有 Express Router，继续用？"） |
+| **任务规划** | 从零开始（初始化项目 → 搭建框架 → …） | 精确定位（修改 routes/auth.ts → 添加验证码逻辑 → …） |
+| **指令生成** | 通用指令 | 引用实际文件路径和代码位置 |
+| **README** | 自动生成 | 不覆盖已有文档 |
 
 ### Q: 一个任务大概消耗多少 Token？
 
@@ -476,7 +531,8 @@ ai-manager/
 │   ├── core/
 │   │   ├── orchestrator.ts          # 核心编排循环
 │   │   ├── task-manager.ts          # 任务管理
-│   │   ├── plan-parser.ts           # 需求解析
+│   │   ├── plan-parser.ts           # 需求解析（支持新建/修改模式）
+│   │   ├── project-scanner.ts       # 项目扫描（目录树/源码/配置）
 │   │   └── requirement-discusser.ts # 需求讨论 + 文档确认 + 归档
 │   ├── terminal/
 │   │   ├── pty-session.ts           # PTY 终端封装
@@ -485,9 +541,13 @@ ai-manager/
 │   ├── brain/
 │   │   ├── llm-client.ts            # LLM 客户端（claude-cli / api 双模式）
 │   │   ├── output-analyzer.ts       # 输出分析
-│   │   ├── instruction-generator.ts # 指令生成
+│   │   ├── instruction-generator.ts # 指令生成（支持项目上下文注入）
 │   │   └── quality-reviewer.ts      # 质量评审
-│   ├── models/                      # 数据模型
+│   ├── models/
+│   │   ├── plan.ts                  # 执行计划模型
+│   │   ├── task.ts                  # 任务模型
+│   │   ├── session-state.ts         # 会话状态模型
+│   │   └── project-context.ts       # 项目上下文模型（新建/修改模式）
 │   └── utils/                       # 工具函数
 ├── dist/                            # 编译输出
 ├── package.json

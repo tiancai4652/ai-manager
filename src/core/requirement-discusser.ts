@@ -2,6 +2,7 @@ import * as readline from 'node:readline';
 import { writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { LlmClient } from '../brain/llm-client.js';
+import type { ProjectContext } from '../models/project-context.js';
 import { logger } from '../utils/logger.js';
 import chalk from 'chalk';
 
@@ -34,6 +35,7 @@ interface DiscussionResponse {
 export class RequirementDiscusser {
   private llm: LlmClient;
   private conversationHistory: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+  private projectContext?: ProjectContext;
 
   constructor(llm: LlmClient) {
     this.llm = llm;
@@ -43,9 +45,16 @@ export class RequirementDiscusser {
    * 启动需求讨论
    * @param initialRequirement 用户原始需求
    * @param workingDir 工作目录（用于保存需求文档）
+   * @param projectContext 项目上下文（modify 模式时传入）
    */
-  async discuss(initialRequirement: string, workingDir: string): Promise<DiscussionResult> {
-    console.log(chalk.cyan('\n💬 需求讨论'));
+  async discuss(initialRequirement: string, workingDir: string, projectContext?: ProjectContext): Promise<DiscussionResult> {
+    this.projectContext = projectContext;
+
+    const modeHint = projectContext?.mode === 'modify'
+      ? chalk.yellow(' (修改已有项目)')
+      : '';
+
+    console.log(chalk.cyan('\n💬 需求讨论') + modeHint);
     console.log(chalk.gray('─'.repeat(50)));
     console.log(chalk.white(`你的需求: ${initialRequirement}`));
     console.log(chalk.gray('─'.repeat(50)));
@@ -173,8 +182,10 @@ export class RequirementDiscusser {
       .map(m => `${m.role === 'user' ? '用户' : 'AI'}: ${m.content}`)
       .join('\n');
 
+    const systemPrompt = this.buildDiscusserPrompt();
+
     return await this.llm.chatJson<DiscussionResponse>({
-      system: DISCUSSER_SYSTEM_PROMPT,
+      system: systemPrompt,
       user: `## 对话历史\n${conversation}`,
       schemaName: 'discussion_response',
       schemaDescription: '分析用户需求，判断是否需要更多信息',
@@ -271,6 +282,27 @@ export class RequirementDiscusser {
     const lower = text.toLowerCase();
     return signals.some(s => lower.includes(s));
   }
+
+  /**
+   * 构建 discusser system prompt
+   * modify 模式时附加项目上下文，让 LLM 能问出针对性问题
+   */
+  private buildDiscusserPrompt(): string {
+    let prompt = DISCUSSER_SYSTEM_PROMPT;
+
+    if (this.projectContext?.mode === 'modify') {
+      prompt += '\n\n' + DISCUSSER_MODIFY_CONTEXT;
+      prompt += '\n\n## 现有项目信息\n';
+      prompt += `### 项目结构\n\`\`\`\n${this.projectContext.fileTree}\n\`\`\`\n`;
+      prompt += `### package.json\n\`\`\`json\n${this.projectContext.packageInfo}\n\`\`\`\n`;
+
+      if (this.projectContext.existingReadme !== '(无 README)') {
+        prompt += `### 已有文档摘要\n${this.projectContext.existingReadme}\n`;
+      }
+    }
+
+    return prompt;
+  }
 }
 
 const DISCUSSER_SYSTEM_PROMPT = `你是一个需求分析专家。你的任务是和用户讨论他们的软件开发需求，确保需求足够清晰、具体，可以交给编码 AI 直接执行。
@@ -322,3 +354,14 @@ const SYNTHESIZER_SYSTEM_PROMPT = `你是一个需求文档生成专家。根据
 - 能通过 npm start 启动
 - 所有 API 端点可正常调用
 \`\`\``;
+
+const DISCUSSER_MODIFY_CONTEXT = `
+## 重要：这是一个已有项目的修改任务
+
+你已经有项目的结构和信息，请在提问时利用这些知识：
+
+1. **引用现有代码**：例如 "我看到项目中已经有 routes/auth.ts，你希望在它的基础上扩展还是新建文件？"
+2. **确认影响范围**：问清楚修改会影响哪些现有功能
+3. **确认风格一致**：如果项目已有明确的模式（如 REST 风格、MVC 等），确认是否继续保持
+4. **最小化假设**：不要假设需要重写已有代码，优先问"在现有基础上修改"相关的问题
+5. **如果需求已经明确**（比如"给某个接口加个参数"），可以直接 needsMoreInfo=false，不需要再问`;

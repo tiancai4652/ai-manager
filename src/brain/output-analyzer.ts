@@ -1,6 +1,7 @@
 import { LlmClient } from './llm-client.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { OutputBuffer } from '../terminal/output-buffer.js';
+import { OutputFilter } from '../terminal/output-filter.js';
 
 /**
  * 输出分析器
@@ -17,9 +18,10 @@ export class OutputAnalyzer {
    * 分析终端输出，判断当前状态
    * @param buffer 输出缓冲区
    * @param taskDescription 当前任务的描述（帮助 LLM 理解上下文）
+   * @param maxLines 取最近多少行终端输出（默认 30）
    */
-  async analyze(buffer: OutputBuffer, taskDescription: string): Promise<OutputAnalysis> {
-    const recentOutput = buffer.getRecentLines(80);
+  async analyze(buffer: OutputBuffer, taskDescription: string, maxLines = 30): Promise<OutputAnalysis> {
+    const recentOutput = OutputFilter.compress(buffer.getRecentLines(maxLines));
 
     if (recentOutput.trim().length === 0) {
       return {
@@ -72,37 +74,24 @@ export class OutputAnalyzer {
   }
 }
 
-const ANALYZER_SYSTEM_PROMPT = `你是一个终端输出分析专家。你的任务是分析一个编码 AI（如 Claude Code）的终端输出，判断它当前的状态。
+const ANALYZER_SYSTEM_PROMPT = `Analyze terminal output from a coding AI (Claude Code). Determine its current state.
 
-## 状态定义
+States: working | waiting_input | idle | error | completed | unknown
+- working: actively processing, progress shown, files being modified
+- waiting_input: prompt awaiting response (Y/N, filename, etc.)
+- idle: command finished, back at shell prompt
+- error: visible errors, crashes, exceptions
+- completed: success messages, files created, tests passed
+- unknown: cannot determine
 
-- **working**: 正在执行任务。特征：输出正在进行中，有进度信息，文件正在被创建/修改
-- **waiting_input**: 等待用户输入。特征：出现提示符等待回答（如 Y/N 选择、要输入文件名等）
-- **idle**: 空闲。特征：命令执行完毕，回到 shell 提示符，等待新命令
-- **error**: 出现错误。特征：有明显的错误信息、红色错误输出、进程崩溃
-- **completed**: 任务完成。特征：编码 AI 输出了完成信息、所有文件已创建
-- **unknown**: 无法判断
+Rules:
+- Focus on LAST few lines — state is determined by recent output
+- Distinguish "still processing" from "finished"
+- [y/n] prompts = waiting_input
+- Tests passing / files created = completed
+- Error/Failed/exception while running = error
 
-## 分析要点
+needsIntervention=true ONLY for: physical actions, private info (passwords/keys/addresses), dangerous confirmations, environment config that cannot be automated.
+needsIntervention=false for: Y/N confirmations, missing deps, compile errors, test failures (brain handles these).
 
-1. 关注最后的几行输出——状态通常由最近的输出决定
-2. 注意区分"还在处理中"和"已经完成"
-3. Claude Code 在等待权限确认时会出现 [y/n] 类似的提示
-4. 如果输出中包含测试通过、文件创建成功等信息，倾向于 completed
-5. 如果有明显的 Error/Failed/exception 但还在运行中，标记为 error
-
-请准确判断状态并给出简要总结。
-
-## needsIntervention 判断规则
-
-设为 true（需要人类在现实世界做动作或提供信息）：
-- AI 要求用户插拔硬件设备、扫描二维码、打开某个 App
-- AI 问只有用户知道的信息（密码、端口号、服务器地址、API key）
-- AI 遇到需要人工确认后才能继续的操作（如确认删除生产数据）
-- AI 因为缺少环境配置卡住，且无法通过命令行自动解决
-
-设为 false（大脑 AI 可以自动处理，不需要人）：
-- Y/N 权限确认、安装确认（大脑可以自动回答 yes）
-- 缺少依赖需要安装（大脑可以生成安装命令）
-- 代码编译/语法错误（大脑可以生成修复）
-- 测试失败（大脑可以分析并修复）`;
+IMPORTANT: summary MUST be in Chinese, under 20 words. Return JSON.`;

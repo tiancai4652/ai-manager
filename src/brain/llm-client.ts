@@ -197,22 +197,26 @@ export class LlmClient {
     return text;
   }
 
+  /** 缓存已渲染的 schema JSON 指令，避免重复序列化 */
+  private schemaInstructionCache = new Map<string, string>();
+
   private chatJsonViaCli<T>(
     system: string,
     user: string,
-    _schemaName: string,
+    schemaName: string,
     schema: Record<string, unknown>,
   ): T {
-    // 让 claude -p 返回 JSON，强调不能有其他文本
-    const jsonInstruction = [
-      system,
-      '',
-      'CRITICAL: Respond with ONLY a JSON object. No explanation, no markdown, no text before or after.',
-      'Schema:',
-      JSON.stringify({ type: 'object', ...schema }, null, 2),
-      '',
-      'Do not include any text outside the JSON object.',
-    ].join('\n');
+    // 让 claude -p 返回 JSON：按 schemaName 缓存，压缩 schema（去掉 description）
+    let jsonInstruction = this.schemaInstructionCache.get(schemaName);
+    if (!jsonInstruction) {
+      const compactSchema = LlmClient.stripDescriptions({ type: 'object', ...schema });
+      jsonInstruction = [
+        system,
+        '',
+        `JSON only. Schema: ${JSON.stringify(compactSchema)}`,
+      ].join('\n');
+      this.schemaInstructionCache.set(schemaName, jsonInstruction);
+    }
 
     const prompt = this.buildCliPrompt(jsonInstruction, user);
     const raw = this.callClaudeCli(prompt);
@@ -231,6 +235,25 @@ export class LlmClient {
         `原始内容: ${raw.slice(0, 200)}`
       );
     }
+  }
+
+  /**
+   * 递归移除 schema 中的 description 字段，减少 token 消耗
+   */
+  private static stripDescriptions(obj: unknown): unknown {
+    if (Array.isArray(obj)) {
+      return obj.map(LlmClient.stripDescriptions);
+    }
+    if (obj && typeof obj === 'object') {
+      const result: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+        if (key !== 'description') {
+          result[key] = LlmClient.stripDescriptions(value);
+        }
+      }
+      return result;
+    }
+    return obj;
   }
 
   // ── api 模式实现 ──

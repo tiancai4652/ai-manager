@@ -6,6 +6,7 @@ import { PlanParser } from './plan-parser.js';
 import { TaskManager } from './task-manager.js';
 import { ProjectScanner } from './project-scanner.js';
 import { LlmClient } from '../brain/llm-client.js';
+import { OutputFilter } from '../terminal/output-filter.js';
 import type { Plan } from '../models/plan.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { Task } from '../models/task.js';
@@ -79,6 +80,10 @@ export class Orchestrator {
   private plan: Plan | null = null;
   private aborted = false;
   private execLog: ExecutionLog;
+  /** 上次分析时的输出变化令牌，用于跳过无变化的 LLM 调用 */
+  private lastAnalyzedChangeToken = -1;
+  /** 预渲染的项目上下文字符串，一次编排中不变 */
+  private cachedContextBlock = '';
 
   constructor(opts: OrchestratorOptions) {
     this.opts = opts;
@@ -89,6 +94,8 @@ export class Orchestrator {
     this.outputAnalyzer = new OutputAnalyzer(this.llm);
     this.instructionGenerator = new InstructionGenerator(this.llm);
     this.qualityReviewer = new QualityReviewer(this.llm);
+    // 预渲染项目上下文（紧凑版），后续所有 LLM 调用复用此字符串
+    this.cachedContextBlock = ProjectScanner.renderCompactContextBlock(opts.projectContext);
   }
 
   /**
@@ -188,11 +195,13 @@ export class Orchestrator {
   private async executeTask(task: Task): Promise<void> {
     this.taskManager.updateStatus(task.id, 'in_progress');
     this.execLog.taskStatus(task.title, 'in_progress');
+    // 重置变化令牌，新任务从头跟踪
+    this.lastAnalyzedChangeToken = -1;
 
     // 生成初始指令
     this.execLog.brainCall('生成指令', task.title);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成指令...' });
-    const instruction = await this.instructionGenerator.generateInitialInstruction(task, this.opts.projectContext);
+    const instruction = await this.instructionGenerator.generateInitialInstruction(task, this.cachedContextBlock);
     this.execLog.brainResponse('生成指令', instruction.content);
     this.taskManager.recordInstruction(task.id, instruction.content);
 
@@ -240,6 +249,14 @@ export class Orchestrator {
         }
         continue; // 恢复监控循环
       }
+
+      // 跳过无变化的输出分析，节省 token
+      const currentToken = this.session?.output?.getChangeToken() ?? 0;
+      if (currentToken === this.lastAnalyzedChangeToken) {
+        logger.debug('  终端输出无变化，跳过本轮分析');
+        continue;
+      }
+      this.lastAnalyzedChangeToken = currentToken;
 
       // 分析终端输出（大脑 LLM）
       const analysis = await this.analyzeOutput(task);
@@ -307,7 +324,8 @@ export class Orchestrator {
       }
       const result = await this.outputAnalyzer.analyze(
         this.session.output,
-        `${task.title}: ${task.description}`
+        `${task.title}: ${task.description}`,
+        this.config.analysisLineCount,
       );
       this.execLog.brainResponse('输出分析', `${result.state}: ${result.summary}`);
       // 记录终端快照
@@ -330,7 +348,9 @@ export class Orchestrator {
    * 处理等待输入状态
    */
   private async handleWaitingInput(task: Task, analysis: OutputAnalysis): Promise<void> {
-    const recentOutput = this.session?.output?.getRecentLines(20) ?? '';
+    const recentOutput = OutputFilter.compressLight(
+      this.session?.output?.getRecentLines(20) ?? ''
+    );
 
     let instruction;
     if (analysis.suggestedInput) {
@@ -342,7 +362,7 @@ export class Orchestrator {
         task,
         analysis,
         recentOutput,
-        projectContext: this.opts.projectContext,
+        contextBlock: this.cachedContextBlock,
       });
       this.execLog.brainResponse('生成响应', instruction.content);
     }
@@ -379,14 +399,16 @@ export class Orchestrator {
       return;
     }
 
-    const recentOutput = this.session?.output?.getRecentLines(30) ?? '';
+    const recentOutput = OutputFilter.compressLight(
+      this.session?.output?.getRecentLines(30) ?? ''
+    );
     this.execLog.brainCall('错误恢复', analysis.summary);
     this.emitProgress('executing', task, { brainActivity: '🧠 生成错误修复...' });
     const instruction = await this.instructionGenerator.generateResponse({
       task,
       analysis,
       recentOutput,
-      projectContext: this.opts.projectContext,
+      contextBlock: this.cachedContextBlock,
     });
     this.execLog.brainResponse('错误恢复', instruction.content);
 
@@ -436,7 +458,7 @@ export class Orchestrator {
         task,
         issues: review.issues,
         suggestedFix: review.suggestedFix,
-        projectContext: this.opts.projectContext,
+        contextBlock: this.cachedContextBlock,
       });
       this.execLog.brainResponse('生成修复', fixInstruction.content);
 

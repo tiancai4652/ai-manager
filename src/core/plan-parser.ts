@@ -1,5 +1,6 @@
 import { LlmClient } from '../brain/llm-client.js';
 import { TaskPlanSchema } from '../models/task.js';
+import type { ProjectContext } from '../models/project-context.js';
 import { logger } from '../utils/logger.js';
 import { v4 as uuid } from 'uuid';
 
@@ -31,8 +32,8 @@ export class PlanParser {
    * 将用户需求解析为任务列表
    * MVP 阶段：先拆为多个任务（后续支持依赖关系）
    */
-  async parse(requirement: string, workingDir: string): Promise<ParsedPlan> {
-    logger.info(`解析需求: ${requirement.slice(0, 50)}...`);
+  async parse(requirement: string, workingDir: string, projectContext?: ProjectContext): Promise<ParsedPlan> {
+    logger.info(`解析需求: ${requirement.slice(0, 50)}... (模式: ${projectContext?.mode ?? 'new'})`);
 
     const maxRetries = 3;
     let lastError: Error | null = null;
@@ -44,8 +45,8 @@ export class PlanParser {
         }
 
         const raw = await this.llm.chatJson<unknown>({
-          system: PLAN_PARSER_SYSTEM_PROMPT,
-          user: `## 用户需求\n${requirement}\n\n## 工作目录\n${workingDir}\n\n请将需求分解为有序的任务列表。`,
+          system: this.buildSystemPrompt(projectContext),
+          user: this.buildUserPrompt(requirement, workingDir, projectContext),
           schemaName: 'task_plan',
           schemaDescription: '将用户需求分解为有序的任务列表',
           schema: {
@@ -107,34 +108,76 @@ export class PlanParser {
       `请检查模型是否正确，或需求是否过于模糊。`
     );
   }
+
+  /**
+   * 根据 mode 选择 system prompt
+   */
+  private buildSystemPrompt(projectContext?: ProjectContext): string {
+    if (projectContext?.mode === 'modify') {
+      return PLAN_PARSER_BASE_PROMPT + PLAN_PARSER_MODIFY_SUFFIX;
+    }
+    return PLAN_PARSER_BASE_PROMPT + PLAN_PARSER_NEW_SUFFIX;
+  }
+
+  /**
+   * 构建 user prompt，modify 模式时附加项目上下文
+   */
+  private buildUserPrompt(requirement: string, workingDir: string, projectContext?: ProjectContext): string {
+    if (projectContext?.mode === 'modify') {
+      return [
+        '## 用户需求',
+        requirement,
+        '',
+        '## 现有项目结构',
+        '```',
+        projectContext.fileTree,
+        '```',
+        '',
+        '## 现有 package.json',
+        '```json',
+        projectContext.packageInfo,
+        '```',
+        '',
+        '## 现有配置文件',
+        projectContext.configFiles,
+        '',
+        '## 关键源文件',
+        projectContext.sourceFiles,
+        '',
+        '## 已有文档摘要',
+        projectContext.existingReadme,
+        '',
+        `这是一个已有项目（${workingDir}）。请在现有架构基础上规划修改任务。`,
+      ].join('\n');
+    }
+
+    return `## 用户需求\n${requirement}\n\n## 工作目录\n${workingDir}\n\n请将需求分解为有序的任务列表。`;
+  }
 }
 
-const PLAN_PARSER_SYSTEM_PROMPT = `你是一个项目任务分解专家。你的任务是将用户的软件需求分解为有序、可执行的任务列表。
+/** 任务分解共享规则 */
+const PLAN_PARSER_BASE_PROMPT = `你是任务分解专家，将软件需求分解为有序、可执行的任务列表。
 
 ## 分解原则
+1. 有序执行：按依赖关系排列
+2. 粒度适中：每个任务可一次完成
+3. 具体明确：描述包含具体做什么
+4. 最后一个任务应该是验证/测试
+5. 任务描述要包含：目标文件、具体功能、技术细节、要运行的命令`;
 
-1. **有序执行**：任务按依赖关系排列，前面的任务是后面的基础
-2. **粒度适中**：每个任务应该可以在一次 Claude Code 对话中完成
-3. **具体明确**：描述要包含具体要做什么，不要模糊
-4. **验证环节**：最后一个任务应该是验证/测试
-5. **一般 3-8 个任务**：不要太多也不要太少
+/** 新建项目模式附加 */
+const PLAN_PARSER_NEW_SUFFIX = `
 
-## 任务描述要求
+一般 3-8 个任务。`;
 
-- 包含要创建/修改的文件
-- 包含要实现的具体功能
-- 包含技术细节（框架、库、API 等）
-- 如果需要运行命令，说明命令
+/** 修改已有项目模式附加 */
+const PLAN_PARSER_MODIFY_SUFFIX = `
 
-## 示例
-
-用户需求: "用 Express 做一个 REST API，有用户认证和 CRUD"
-
-分解:
-1. "初始化项目" — npm init, 安装 express, 搭建基本 server.ts
-2. "实现数据模型" — 定义 User 和 Resource 的 schema
-3. "实现 CRUD API" — GET/POST/PUT/DELETE 端点
-4. "实现认证" — JWT 认证中间件，登录/注册接口
-5. "编写测试" — API 端点测试
-6. "验证运行" — 启动服务，测试所有端点`;
+## 修改模式要点
+- 先理解现有架构再动手
+- 最小化变更，不重建已有功能
+- 保持现有风格和命名约定
+- 向后兼容，不破坏已有功能
+- 明确指出要修改哪个文件、在什么位置
+- 一般 2-6 个任务`;
 

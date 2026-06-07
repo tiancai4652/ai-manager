@@ -25,6 +25,8 @@ const ConfigSchema = z.object({
   terminalRows: z.number().default(40),
   /** 日志级别 */
   logLevel: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+  /** 输出分析时取最近多少行终端输出（默认 30，原 80） */
+  analysisLineCount: z.number().default(30),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
@@ -42,6 +44,7 @@ const DEFAULT_CONFIG: Config = {
   terminalCols: 120,
   terminalRows: 40,
   logLevel: 'info',
+  analysisLineCount: 30,
 };
 
 let cachedConfig: Config | null = null;

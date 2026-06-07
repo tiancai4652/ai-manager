@@ -13,6 +13,8 @@ export class OutputBuffer {
   private maxLines: number;
   /** 所有原始输出（用于获取完整历史） */
   private fullRawOutput = '';
+  /** 变化令牌：每次 append/clear 自增，用于检测输出是否有变化 */
+  private changeToken = 0;
 
   constructor(maxLines = 500) {
     this.maxLines = maxLines;
@@ -23,6 +25,7 @@ export class OutputBuffer {
     this.rawChunks.push(data);
     this.cleanChunks.push(stripAnsi(data));
     this.fullRawOutput += data;
+    this.changeToken++;
 
     // 滑动窗口：按行数裁剪
     const totalLines = this.cleanChunks.join('').split('\n').length;
@@ -81,10 +84,21 @@ export class OutputBuffer {
     this.rawChunks = [];
     this.cleanChunks = [];
     this.fullRawOutput = '';
+    this.changeToken++;
   }
 
   /** 获取缓冲区大致大小 */
   get size(): number {
     return this.fullRawOutput.length;
+  }
+
+  /** 获取当前变化令牌（每次输出变化时自增） */
+  getChangeToken(): number {
+    return this.changeToken;
+  }
+
+  /** 判断自给定令牌以来输出是否发生了变化 */
+  hasChangedSince(token: number): boolean {
+    return this.changeToken !== token;
   }
 }

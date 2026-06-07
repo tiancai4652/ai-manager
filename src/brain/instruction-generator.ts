@@ -1,7 +1,6 @@
 import { LlmClient } from './llm-client.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { Task } from '../models/task.js';
-import type { ProjectContext } from '../models/project-context.js';
 
 /**
  * 指令生成结果
@@ -27,53 +26,50 @@ export class InstructionGenerator {
   }
 
   /**
-   * 为新任务生成初始指令
+   * 为新任务生成初始指令（含 NEED_HUMAN 协议）
    */
-  async generateInitialInstruction(task: Task, projectContext?: ProjectContext): Promise<Instruction> {
-    const contextBlock = this.buildContextBlock(projectContext);
+  async generateInitialInstruction(task: Task, contextBlock?: string): Promise<Instruction> {
     const raw = await this.llm.chat({
-      system: INSTRUCTOR_SYSTEM_PROMPT,
-      user: `请为以下任务生成发送给 Claude Code 的指令：\n\n## 任务标题\n${task.title}\n\n## 任务描述\n${task.description}${contextBlock}`,
+      system: INSTRUCTOR_BASE_PROMPT + NEED_HUMAN_PROTOCOL,
+      user: `请为以下任务生成发送给 Claude Code 的指令：\n\n## 任务标题\n${task.title}\n\n## 任务描述\n${task.description}${contextBlock ?? ''}`,
       maxTokens: 2048,
     });
     return this.parseInstruction(raw);
   }
 
   /**
-   * 根据输出分析结果，生成响应指令
+   * 根据输出分析结果，生成响应指令（无需 NEED_HUMAN 协议，节省 token）
    */
   async generateResponse(params: {
     task: Task;
     analysis: OutputAnalysis;
     recentOutput: string;
-    projectContext?: ProjectContext;
+    contextBlock?: string;
   }): Promise<Instruction> {
-    const { task, analysis, recentOutput, projectContext } = params;
-    const contextBlock = this.buildContextBlock(projectContext);
+    const { task, analysis, recentOutput, contextBlock } = params;
 
     const raw = await this.llm.chat({
-      system: INSTRUCTOR_SYSTEM_PROMPT,
-      user: `## 当前任务\n${task.title}: ${task.description}\n\n## 终端状态\n${analysis.state}\n\n## 分析摘要\n${analysis.summary}\n\n## 终端最近输出\n\`\`\`\n${recentOutput}\n\`\`\`\n\n${analysis.suggestedAction ? `## 建议动作\n${analysis.suggestedAction}` : ''}${contextBlock}\n\n请生成适当的响应指令。如果编码 AI 在等待确认，回复 Y；如果在等待更多信息，给出补充说明。`,
+      system: INSTRUCTOR_BASE_PROMPT,
+      user: `## 当前任务\n${task.title}: ${task.description}\n\n## 终端状态\n${analysis.state}\n\n## 分析摘要\n${analysis.summary}\n\n## 终端最近输出\n\`\`\`\n${recentOutput}\n\`\`\`\n\n${analysis.suggestedAction ? `## 建议动作\n${analysis.suggestedAction}` : ''}${contextBlock ?? ''}\n\n请生成适当的响应指令。如果编码 AI 在等待确认，回复 Y；如果在等待更多信息，给出补充说明。`,
       maxTokens: 2048,
     });
     return this.parseInstruction(raw);
   }
 
   /**
-   * 根据质量评审不通过的结果，生成修复指令
+   * 根据质量评审不通过的结果，生成修复指令（含 NEED_HUMAN 协议）
    */
   async generateFixInstruction(params: {
     task: Task;
     issues: string[];
     suggestedFix?: string;
-    projectContext?: ProjectContext;
+    contextBlock?: string;
   }): Promise<Instruction> {
-    const { task, issues, suggestedFix, projectContext } = params;
-    const contextBlock = this.buildContextBlock(projectContext);
+    const { task, issues, suggestedFix, contextBlock } = params;
 
     const raw = await this.llm.chat({
-      system: INSTRUCTOR_SYSTEM_PROMPT,
-      user: `## 任务\n${task.title}: ${task.description}\n\n## 发现的问题\n${issues.map((i, idx) => `${idx + 1}. ${i}`).join('\n')}\n\n${suggestedFix ? `## 修复建议\n${suggestedFix}` : ''}${contextBlock}\n\n请生成修复指令，让编码 AI 修正上述问题。指令要具体、可操作。`,
+      system: INSTRUCTOR_BASE_PROMPT + NEED_HUMAN_PROTOCOL,
+      user: `## 任务\n${task.title}: ${task.description}\n\n## 发现的问题\n${issues.map((i, idx) => `${idx + 1}. ${i}`).join('\n')}\n\n${suggestedFix ? `## 修复建议\n${suggestedFix}` : ''}${contextBlock ?? ''}\n\n请生成修复指令，让编码 AI 修正上述问题。指令要具体、可操作。`,
       maxTokens: 2048,
     });
     return this.parseInstruction(raw);
@@ -111,69 +107,21 @@ export class InstructionGenerator {
     return { content, waitFor };
   }
 
-  /**
-   * 构建 modify 模式的项目上下文块
-   * new 模式返回空字符串
-   */
-  private buildContextBlock(projectContext?: ProjectContext): string {
-    if (!projectContext || projectContext.mode !== 'modify') {
-      return '';
-    }
-
-    return [
-      '',
-      '## 现有项目上下文（修改已有项目）',
-      '',
-      '### 项目结构',
-      '```',
-      projectContext.fileTree,
-      '```',
-      '',
-      '### 关键源文件',
-      projectContext.sourceFiles,
-    ].join('\n');
-  }
 }
 
-const INSTRUCTOR_SYSTEM_PROMPT = `你是一个编码任务指令生成专家。你的任务是为 Claude Code 生成精确的指令。
+/** 指令生成核心规则（每次调用都使用） */
+const INSTRUCTOR_BASE_PROMPT = `Generate instructions for Claude Code. Rules:
+1. Specific, include necessary context
+2. One task per instruction
+3. Concise, state the goal directly
+4. MUST output in Chinese
+5. NO code (the coding AI writes its own code)
 
-## 原则
+Output: first line WAIT:ms (simple=2000, medium=5000, complex=8000), then instruction text in Chinese.`;
 
-1. 指令要具体明确，包含所有必要上下文
-2. 一次一个任务
-3. 简洁高效，直接说目标
-4. 用中文写指令
-5. **不要包含任何代码**（编码 AI 会自己写）
+/** 人工介入协议（仅在初始指令和修复指令时附加） */
+const NEED_HUMAN_PROTOCOL = `
 
-## ⚠️ 人工介入协议
-
-如果执行过程中遇到以下情况，你**必须**在输出中输出特定标记来请求人工介入：
-
-- 需要用户做物理操作（插拔设备、扫码、打开 App）
-- 需要只有用户知道的信息（密码、API Key、服务器地址、端口号）
-- 需要权限但无法自动获取（登录认证、sudo 权限）
-- 需要用户确认的危险操作（删除生产数据、修改关键配置）
-- 环境依赖无法自动解决（需要手动安装软件、配置环境变量）
-
-输出格式（必须严格遵循）：
-\`\`\`
-[NEED_HUMAN]
-具体原因和需要用户做什么
-[/NEED_HUMAN]
-\`\`\`
-
-示例：
-\`\`\`
-[NEED_HUMAN]
-需要数据库连接信息：请提供 MySQL 的主机地址和端口号
-[/NEED_HUMAN]
-\`\`\`
-
-注意：代码编译错误、缺少 npm 依赖、测试失败等**不需要**人工介入，你应该自行解决。
-
-## 输出格式
-
-严格按以下格式输出（第一行是等待时间，后面是指令内容）：
-
-WAIT: 毫秒数（简单2000，中等5000，复杂8000）
-具体的指令文本，可以多行描述要做什么。`;
+## 人工介入
+遇到以下情况输出 [NEED_HUMAN]原因[/NEED_HUMAN]：需物理操作、私有信息(密码/key/地址)、权限认证、危险确认、环境依赖。
+代码错误、依赖缺失、测试失败等自行处理，不算人工介入。`;
