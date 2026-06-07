@@ -65,8 +65,8 @@ npm install -g @anthropic-ai/claude-code
 export ANTHROPIC_API_KEY=sk-ant-xxxxx
 
 # 或者写入配置
-node dist/index.js config set apiKey sk-ant-xxxxx
-node dist/index.js config set brainMode api
+aimanager config set apiKey sk-ant-xxxxx
+aimanager config set brainMode api
 ```
 
 ---
@@ -78,19 +78,19 @@ node dist/index.js config set brainMode api
 ```bash
 # 最简单的用法 — 需求可以很粗略，会引导你细化
 # 未指定目录时自动创建 ./ai-manager-workspace/<时间戳>
-node dist/index.js run "做一个网站"
+aimanager run "做一个网站"
 
 # 指定工作目录（推荐）
-node dist/index.js run "创建一个 Express REST API" --dir /path/to/my-project
+aimanager run "创建一个 Express REST API" --dir /path/to/my-project
 
 # 指定模型
-node dist/index.js run "做一个 Todo App" --model claude-sonnet-4-20250514
+aimanager run "做一个 Todo App" --model claude-sonnet-4-20250514
 
 # 跳过讨论，直接执行（需求已经写得很清楚时用）
-node dist/index.js run "用 Express + TypeScript 创建 REST API" -y
+aimanager run "用 Express + TypeScript 创建 REST API" -y
 
 # 查看运行时详情
-node dist/index.js run "..." --debug
+aimanager run "..." --debug
 ```
 
 ### 修改已有项目
@@ -99,7 +99,7 @@ node dist/index.js run "..." --debug
 
 ```bash
 # 指向已有项目 → 自动检测，进入修改模式
-node dist/index.js run "给登录接口加上验证码" --dir /path/to/existing-project
+aimanager run "给登录接口加上验证码" --dir /path/to/existing-project
 
 # 你会看到：
 # 📂 检测到已有项目 (18 项)
@@ -118,11 +118,11 @@ node dist/index.js run "给登录接口加上验证码" --dir /path/to/existing-
 
 ```bash
 # 方式 1: 命令行直接写（适合简短需求）
-node dist/index.js run "给 CLI 添加一个 version 命令" --dir /path/to/project
+aimanager run "给 CLI 添加一个 version 命令" --dir /path/to/project
 
 # 方式 2: 先进项目，再聊需求（推荐）
 #         不写 requirement 参数，会弹出交互式输入框
-node dist/index.js run --dir /path/to/project
+aimanager run --dir /path/to/project
 # → 💬 请描述你的需求
 # → 📂 项目: /path/to/project
 # → 📦 项目名: my-project
@@ -130,7 +130,7 @@ node dist/index.js run --dir /path/to/project
 # → >
 
 # 方式 3: 甩需求文档（适合复杂需求）
-node dist/index.js run --req-doc ./requirements.md --dir /path/to/project
+aimanager run --req-doc ./requirements.md --dir /path/to/project
 # → 📄 已加载需求文档: requirements.md (1234 字)
 ```
 
@@ -223,7 +223,7 @@ node dist/index.js run --req-doc ./requirements.md --dir /path/to/project
 ### `run` — 执行任务
 
 ```bash
-node dist/index.js run [requirement] [选项]
+aimanager run [requirement] [选项]
 ```
 
 | 参数 | 说明 |
@@ -240,10 +240,10 @@ node dist/index.js run [requirement] [选项]
 
 ```bash
 # 简单任务
-node dist/index.js run "创建一个 package.json 和 index.ts，输出 hello world"
+aimanager run "创建一个 package.json 和 index.ts，输出 hello world"
 
 # 复杂需求
-node dist/index.js run "用 React + TypeScript 做一个 Todo App，要求：
+aimanager run "用 React + TypeScript 做一个 Todo App，要求：
   - 添加/删除/标记完成
   - 数据存 localStorage
   - 有过滤功能（全部/未完成/已完成）
@@ -251,7 +251,7 @@ node dist/index.js run "用 React + TypeScript 做一个 Todo App，要求：
   - 写单元测试"
 
 # 指定目录和 Agent
-node dist/index.js run "实现用户注册登录 API" \
+aimanager run "实现用户注册登录 API" \
   --dir ~/projects/my-api \
   --agent codex
 ```
@@ -260,19 +260,19 @@ node dist/index.js run "实现用户注册登录 API" \
 
 ```bash
 # 交互式选择（推荐，列出所有可用模型让你选）
-node dist/index.js model
+aimanager model
 
 # 列出所有模型（不进入交互，只显示列表）
-node dist/index.js model list
+aimanager model list
 
 # 直接设置模型 ID
-node dist/index.js model set glm-5-turbo
+aimanager model set glm-5-turbo
 ```
 
 交互式选择示例：
 
 ```
-$ node dist/index.js model
+$ aimanager model
 
 可用模型:
 
@@ -294,27 +294,27 @@ $ node dist/index.js model
 
 ```bash
 # 查看所有配置
-node dist/index.js config list
+aimanager config list
 
 # 查看单个配置
-node dist/index.js config get brainModel
+aimanager config get brainModel
 
 # 修改配置
-node dist/index.js config set maxRetries 5
-node dist/index.js config set analysisInterval 5000
+aimanager config set maxRetries 5
+aimanager config set analysisInterval 5000
 ```
 
 ### `log` — 查看运行报告
 
 ```bash
 # 查看最近的运行报告（自动扫描当前目录和 ai-manager-workspace）
-node dist/index.js log
+aimanager log
 
 # 查看指定项目的运行报告
-node dist/index.js log ./my-project
+aimanager log ./my-project
 
 # 显示每次 LLM 调用明细
-node dist/index.js log -v
+aimanager log -v
 ```
 
 报告示例：
@@ -341,6 +341,30 @@ node dist/index.js log -v
 ```
 
 加 `-v` 可看到每次 LLM 调用的时间、用途、耗时和 token 数。
+
+### `resume` — 断点续跑
+
+```bash
+# 自动扫描可恢复的运行
+aimanager resume
+
+# 指定项目目录
+aimanager resume ./my-project
+```
+
+当任务执行被中断（Ctrl+C、超时、错误），运行状态自动保存到 `.aimanager/state.json`。用 `resume` 可以跳过已完成的任务，从断点继续：
+
+```
+🔄 断点续跑
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 需求: 创建 Express + SQLite REST API
+📂 目录: ./my-project
+📊 进度: 3/5 已完成, 2 待执行
+🧠 Brain: glm-5-turbo
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+如果有多个可恢复的运行，会交互式让你选择。
 
 ---
 
@@ -474,6 +498,7 @@ your-project/
     ├── requirement.md    # 需求文档（经讨论确认后的最终版）
     ├── plan.md           # 执行计划（任务拆解）
     ├── execution.log     # 执行日志（大脑交互、状态判断、指令发送）
+    ├── state.json        # 运行状态快照（断点续跑用）
     ├── run-report.json   # 运行报告（结构化数据，token 消耗、调用明细）
     └── run-report.md     # 运行报告（可读版，按用途分类汇总）
 ```
@@ -493,7 +518,33 @@ your-project/
 
 ### Q: 一个任务大概消耗多少 Token？
 
-取决于需求复杂度。简单任务（"创建 hello world"）约 10k-30k Token，中等任务约 50k-100k。大部分 Token 消耗在"大脑"的分析调用上。
+取决于需求复杂度。经过 token 优化后：
+
+| 任务复杂度 | 示例 | LLM 调用 | 估算 Token |
+|-----------|------|---------|-----------|
+| 简单 | hello world | 8-9 次 | 4-5K |
+| 中等 | Express + SQLite API | 20-25 次 | 15-20K |
+| 复杂 | 全栈应用 | 40+ 次 | 30K+ |
+
+主要消耗在输出分析（~45%）和质量评审（~35%）。快速状态预判和智能退避能减少约 30-40% 的不必要调用。
+
+### Q: 任务中断了怎么办？
+
+用 `aimanager resume` 从断点继续：
+
+```bash
+# 自动扫描可恢复的运行
+aimanager resume
+
+# 指定目录
+aimanager resume ./my-project
+```
+
+AI Manager 会在每个任务完成后自动保存进度。中断后恢复时，已完成的任务会被跳过，失败的任务会被重置为待执行。
+
+### Q: 运行时显示的 `🧠 12 ~7.7K tokens` 是什么意思？
+
+这是实时 LLM 调用统计：当前已调用大脑 LLM 12 次，估算消耗了约 7,700 个 token。可以在运行结束后用 `aimanager log -v` 查看详细的每次调用明细。
 
 ### Q: 如果编码 AI 卡住了怎么办？
 
@@ -533,7 +584,7 @@ AI Manager 有多层保护：
 目前支持 `claude-code` 和 `codex` 两种。通过 `--agent` 参数切换：
 
 ```bash
-node dist/index.js run "..." --agent codex
+aimanager run "..." --agent codex
 ```
 
 ### Q: 编码 AI 需要的 API Key 怎么配？
@@ -556,7 +607,7 @@ npm run dev -- run "test task"
 npm run build
 
 # 运行编译后版本
-node dist/index.js run "test task"
+aimanager run "test task"
 ```
 
 ---
