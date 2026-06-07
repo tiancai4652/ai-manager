@@ -542,20 +542,26 @@ ${llmLine}📂 目录: ${plan.workingDir}
  */
 function promptMultilineInput(workingDir: string, mode: 'new' | 'modify', projectContext: import('../models/project-context.js').ProjectContext): Promise<string | null> {
   return new Promise((_resolve) => {
-    console.log(chalk.cyan('\n💬 请描述你的需求'));
+    const isModify = mode === 'modify';
+
+    console.log(chalk.cyan(isModify ? '\n💬 想对这个项目做什么？' : '\n💬 请描述你的需求'));
     console.log(chalk.gray('─'.repeat(50)));
 
-    if (mode === 'modify') {
+    if (isModify) {
       console.log(chalk.gray(`  📂 项目: ${workingDir}`));
       // 从 README 或 package.json 提取项目名
       const pkgMatch = projectContext.packageInfo.match(/"name":\s*"([^"]+)"/);
       if (pkgMatch) {
         console.log(chalk.gray(`  📦 项目名: ${pkgMatch[1]}`));
       }
+      console.log(chalk.gray('  描述你想添加/修改/修复的内容。例如:'));
+      console.log(chalk.gray('    - 给登录接口加上验证码'));
+      console.log(chalk.gray('    - 添加用户注册功能'));
+      console.log(chalk.gray('    - 修复首页加载慢的问题'));
+    } else {
+      console.log(chalk.gray('  输入需求描述，支持多行。连续两次回车结束输入。'));
+      console.log(chalk.gray('  也可以直接输入需求文档路径（.md / .txt）'));
     }
-
-    console.log(chalk.gray('  输入需求描述，支持多行。连续两次回车结束输入。'));
-    console.log(chalk.gray('  也可以直接输入需求文档路径（.md / .txt）'));
     console.log(chalk.gray('─'.repeat(50)));
     process.stdout.write(chalk.yellow('  > '));
 
