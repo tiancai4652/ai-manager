@@ -45,6 +45,11 @@ export class LlmClient {
     this.currentPurpose = purpose;
   }
 
+  /** 获取当前使用的模型名 */
+  getModel(): string {
+    return this.model;
+  }
+
   /**
    * 确定使用哪种调用方式
    */

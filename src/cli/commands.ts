@@ -2,6 +2,7 @@ import * as readline from 'node:readline';
 import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { resolve, join } from 'node:path';
 import { Command } from 'commander';
+import { StatePersistence, type RunState } from '../utils/state-persistence.js';
 import { Orchestrator, type OrchestratorOptions } from '../core/orchestrator.js';
 import { RequirementDiscusser } from '../core/requirement-discusser.js';
 import { PlanParser } from '../core/plan-parser.js';
@@ -406,6 +407,105 @@ ${llmLine}📂 目录: ${plan.workingDir}
       console.log(chalk.green(`✅ 已设置模型: ${found.id} (${found.display_name})`));
     });
 
+  // ─── resume 子命令 — 断点续跑 ──────────────────────
+  program
+    .command('resume')
+    .description('从上次中断处恢复执行')
+    .argument('[dir]', '项目目录（默认扫描 ai-manager-workspace）')
+    .action(async (dir?: string) => {
+      // 扫描可恢复的状态
+      const candidates = findResumableStates(dir);
+
+      if (candidates.length === 0) {
+        console.log(chalk.yellow('没有可恢复的运行。'));
+        console.log(chalk.gray('  提示: 在之前运行的项目目录下执行 aimanager resume ./my-project'));
+        return;
+      }
+
+      // 如果多个，让用户选
+      let chosen = candidates[0];
+      if (candidates.length > 1) {
+        console.log(chalk.cyan('\n找到多个可恢复的运行:\n'));
+        candidates.forEach((c, i) => {
+          const state = c.state;
+          const tasks = state.tasks;
+          const completed = tasks.filter(t => t.status === 'completed').length;
+          const time = state.savedAt ? new Date(state.savedAt).toLocaleString('zh-CN') : '未知';
+          console.log(`  ${i + 1}. ${chalk.white(state.requirement.slice(0, 50))}`);
+          console.log(`     ${chalk.gray(`${c.dir} — ${completed}/${tasks.length} 完成 — ${time}`)}`);
+        });
+        const choice = await promptChoice(`选择恢复 [1-${candidates.length}]`, candidates.length);
+        if (choice === null) {
+          console.log(chalk.yellow('已取消'));
+          return;
+        }
+        chosen = candidates[choice - 1];
+      }
+
+      const state = chosen.state;
+      const tasks = state.tasks;
+      const completed = tasks.filter(t => t.status === 'completed').length;
+      const remaining = tasks.filter(t => t.status !== 'completed').length;
+
+      console.log(chalk.cyan(`
+🔄 断点续跑
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 需求: ${state.requirement.slice(0, 60)}
+📂 目录: ${chosen.dir}
+📊 进度: ${completed}/${tasks.length} 已完成, ${remaining} 待执行
+🧠 Brain: ${state.brainModel}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`));
+
+      // 恢复执行
+      const display = new ProgressDisplay();
+      const orchestrator = new Orchestrator({
+        requirement: state.requirement,
+        workingDir: state.workingDir,
+        agentType: state.agentType,
+        brainModel: state.brainModel,
+        resumeState: state,
+        onProgress: (info) => display.update(info),
+        onComplete: (plan) => {
+          display.stop();
+          const stats = orchestrator.getRunStats();
+          const llmLine = stats ? `🧠  LLM: ${stats.totalCalls} calls, ~${(stats.totalTokens / 1000).toFixed(1)}K tokens\n` : '';
+          console.log(chalk.green(`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+✅ 所有任务已完成!
+📋 需求: ${plan.userRequirement.slice(0, 50)}
+📊 任务: ${plan.tasks.length} 个
+⏱️  总用时: ${Math.round((Date.now() - plan.startedAt.getTime()) / 1000)}s
+${llmLine}📂 目录: ${plan.workingDir}
+📄 报告: ${plan.workingDir}/.aimanager/run-report.{json,md}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+`));
+        },
+        onIntervention: async (reason) => {
+          display.stop();
+          const response = await promptUserIntervention(reason);
+          return response;
+        },
+      });
+
+      const cleanup = () => {
+        console.log(chalk.yellow('\n\n⏸️  正在中止...'));
+        orchestrator.abort();
+        display.stop();
+        process.exit(0);
+      };
+      process.on('SIGINT', cleanup);
+      process.on('SIGTERM', cleanup);
+
+      try {
+        await orchestrator.run();
+      } catch (err) {
+        display.stop();
+        console.error(chalk.red(`\n❌ 恢复执行失败: ${err}`));
+        process.exit(1);
+      }
+    });
+
   // ─── log 子命令 — 查看运行报告 ──────────────────────
   program
     .command('log')
@@ -610,7 +710,53 @@ function promptChoice(message: string, max: number): Promise<number | null> {
   });
 }
 
-// ─── log 命令辅助 ──────────────────────────────────────
+// ─── resume / log 命令辅助 ──────────────────────────────────
+
+/**
+ * 扫描可恢复的运行状态
+ */
+function findResumableStates(dir?: string): Array<{ dir: string; state: RunState }> {
+  const results: Array<{ dir: string; state: RunState }> = [];
+
+  const scanDir = (base: string) => {
+    const sp = new StatePersistence(base);
+    if (sp.canResume()) {
+      const state = sp.load();
+      if (state) {
+        results.push({ dir: base, state });
+      }
+    }
+    // 扫描子目录
+    try {
+      const entries = readdirSync(base, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules') {
+          const subSp = new StatePersistence(join(base, entry.name));
+          if (subSp.canResume()) {
+            const state = subSp.load();
+            if (state) {
+              results.push({ dir: join(base, entry.name), state });
+            }
+          }
+        }
+      }
+    } catch { /* 忽略 */ }
+  };
+
+  if (dir) {
+    scanDir(resolve(dir));
+  } else {
+    scanDir('.');
+    const wsDir = resolve('ai-manager-workspace');
+    if (existsSync(wsDir)) {
+      scanDir(wsDir);
+    }
+  }
+
+  // 最新的排在前面
+  results.sort((a, b) => (b.state.savedAt ?? '').localeCompare(a.state.savedAt ?? ''));
+  return results;
+}
 
 interface RunReportLike {
   requirement?: string;

@@ -8,6 +8,7 @@ import { ProjectScanner } from './project-scanner.js';
 import { LlmClient } from '../brain/llm-client.js';
 import { OutputFilter } from '../terminal/output-filter.js';
 import { RunLogger } from '../utils/run-logger.js';
+import { StatePersistence, type RunState, type TaskSnapshot } from '../utils/state-persistence.js';
 import type { Plan } from '../models/plan.js';
 import type { OutputAnalysis } from '../models/session-state.js';
 import type { Task } from '../models/task.js';
@@ -42,6 +43,8 @@ export interface OrchestratorOptions {
   requirementDocPath?: string;
   /** 项目上下文（modify 模式时传入，包含已有代码信息） */
   projectContext?: ProjectContext;
+  /** 断点续跑：从上次中断的状态恢复 */
+  resumeState?: RunState;
   /** 完成时的回调 */
   onComplete?: (plan: Plan) => void;
   /** 需要人工介入时的回调，返回用户输入的内容 */
@@ -89,11 +92,14 @@ export class Orchestrator {
   private cachedContextBlock = '';
   /** 运行日志记录器（累积 LLM 调用记录） */
   private runLogger: RunLogger;
+  /** 状态持久化（断点续跑） */
+  private statePersist: StatePersistence;
 
   constructor(opts: OrchestratorOptions) {
     this.opts = opts;
     this.execLog = new ExecutionLog(opts.workingDir);
     this.runLogger = new RunLogger(opts.workingDir);
+    this.statePersist = new StatePersistence(opts.workingDir);
     this.llm = new LlmClient(opts.brainModel);
     // 注入调用记录器，每次 LLM 调用自动记录
     this.llm.setRecorder(rec => this.runLogger.record(rec));
@@ -104,6 +110,11 @@ export class Orchestrator {
     this.qualityReviewer = new QualityReviewer(this.llm);
     // 预渲染项目上下文（紧凑版），后续所有 LLM 调用复用此字符串
     this.cachedContextBlock = ProjectScanner.renderCompactContextBlock(opts.projectContext);
+
+    // 断点续跑：从快照恢复任务状态
+    if (opts.resumeState) {
+      this.restoreFromSnapshot(opts.resumeState);
+    }
   }
 
   /**
@@ -114,21 +125,26 @@ export class Orchestrator {
     this.aborted = false;
 
     try {
-      // Phase 1: 需求解析（如果外部已解析则跳过）
+      // Phase 1: 需求解析（如果外部已解析或断点续跑则跳过）
       this.emitProgress('planning');
 
       if (this.opts.preParsedTasks && this.opts.preParsedTasks.length > 0) {
         logger.info(chalk.cyan('📋 使用预解析的任务计划...'));
         this.taskManager.createTasks(this.opts.preParsedTasks);
-      } else {
+      } else if (!this.opts.resumeState) {
         logger.info(chalk.cyan('🎯 开始解析需求...'));
         this.llm.setPurpose('任务解析');
         const parsed = await this.planParser.parse(this.opts.requirement, this.opts.workingDir, this.opts.projectContext);
         this.taskManager.createTasks(parsed.tasks);
+      } else {
+        logger.info(chalk.cyan('📋 从上次中断处恢复...'));
       }
 
       // 保存执行计划文档
       this.savePlanDocument();
+
+      // 保存初始运行状态（断点续跑用）
+      this.saveState('running');
 
       // 构建 Plan 对象
       this.plan = {
@@ -170,6 +186,7 @@ export class Orchestrator {
 
       // Phase 6: 写运行报告
       if (this.plan) {
+        this.statePersist.markCompleted();
         this.runLogger.writeReport({
           requirement: this.opts.requirement,
           startedAt: new Date(this.startTime),
@@ -188,6 +205,7 @@ export class Orchestrator {
 
     } catch (err) {
       logger.error(`编排器错误: ${err}`);
+      this.statePersist.markFailed();
       if (this.plan) {
         this.plan.status = 'failed';
         this.plan.completedAt = new Date();
@@ -203,6 +221,7 @@ export class Orchestrator {
    */
   abort(): void {
     this.aborted = true;
+    this.saveState('interrupted');
     this.session?.kill();
     logger.warn('编排已中止');
   }
@@ -536,6 +555,7 @@ export class Orchestrator {
       this.taskManager.updateStatus(task.id, 'completed');
       this.execLog.taskStatus(task.title, `completed (评分: ${review.score}/10)`);
       logger.info(chalk.green(`  ✅ 任务完成! 评分: ${review.score}/10`));
+      this.saveState('running');  // 每个任务完成后保存进度
       return false;
     } else if (this.taskManager.canRetry(task.id)) {
       logger.warn(chalk.yellow(`  ⚠️ 评审未通过 (评分: ${review.score}/10)，准备重试...`));
@@ -570,6 +590,7 @@ export class Orchestrator {
       this.taskManager.updateStatus(task.id, 'failed');
       this.execLog.taskStatus(task.title, 'failed (重试耗尽)');
       logger.error(chalk.red(`  ❌ 任务失败，已耗尽重试次数`));
+      this.saveState('running');  // 失败也保存，避免丢失已完成任务的进度
       return false;
     }
   }
@@ -757,6 +778,80 @@ export class Orchestrator {
     } catch (err) {
       logger.warn(`生成项目文档失败（不影响项目）: ${err instanceof Error ? err.message : err}`);
     }
+  }
+
+  // ─── 状态持久化（断点续跑）──────────────────────────────
+
+  /**
+   * 保存当前运行状态到 .aimanager/state.json
+   */
+  private saveState(status: RunState['status']): void {
+    const tasks = this.taskManager.getAll();
+    this.statePersist.save({
+      id: this.plan?.id ?? crypto.randomUUID(),
+      requirement: this.opts.requirement,
+      workingDir: this.opts.workingDir,
+      agentType: this.opts.agentType,
+      brainModel: this.llm.getModel(),
+      tasks: tasks.map(t => ({
+        id: t.id,
+        title: t.title,
+        description: t.description,
+        status: t.status,
+        attempts: t.attempts,
+        maxAttempts: t.maxAttempts,
+        instructionHistory: t.instructionHistory,
+        reviewResults: t.reviewResults,
+      })),
+      currentTaskIndex: tasks.findIndex(t => t.status === 'in_progress' || t.status === 'pending'),
+      status,
+      startedAt: this.startTime ? new Date(this.startTime).toISOString() : new Date().toISOString(),
+      savedAt: new Date().toISOString(),
+      requirementDocPath: this.opts.requirementDocPath,
+    });
+  }
+
+  /**
+   * 从快照恢复任务状态（断点续跑）
+   */
+  private restoreFromSnapshot(state: RunState): void {
+    // 恢复任务到 TaskManager
+    for (const snap of state.tasks) {
+      // completed 的任务跳过
+      if (snap.status === 'completed') {
+        this.taskManager.createTasks([{
+          id: snap.id,
+          title: snap.title,
+          description: snap.description,
+          maxAttempts: snap.maxAttempts,
+        }]);
+        // 立即标记为 completed
+        const task = this.taskManager.getById(snap.id);
+        if (task) {
+          this.taskManager.updateStatus(task.id, 'completed');
+        }
+        continue;
+      }
+
+      // failed 的任务重置为 pending 允许重试
+      const effectiveStatus = snap.status === 'failed' ? 'pending' : snap.status;
+      this.taskManager.createTasks([{
+        id: snap.id,
+        title: snap.title,
+        description: snap.description,
+        maxAttempts: snap.maxAttempts,
+      }]);
+      const task = this.taskManager.getById(snap.id);
+      if (task) {
+        this.taskManager.updateStatus(task.id, effectiveStatus);
+      }
+    }
+
+    // 汇报恢复情况
+    const tasks = this.taskManager.getAll();
+    const completed = tasks.filter(t => t.status === 'completed').length;
+    const remaining = tasks.filter(t => t.status !== 'completed').length;
+    logger.info(chalk.cyan(`📋 恢复状态: ${completed} 个已完成, ${remaining} 个待执行`));
   }
 
 }
