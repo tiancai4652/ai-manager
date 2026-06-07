@@ -245,6 +245,10 @@ export class Orchestrator {
     const maxCycles = 60;
     let cycle = 0;
 
+    // 智能退避：连续 working 时逐步加大间隔
+    let consecutiveWorking = 0;
+    const backoffSteps = [3000, 5000, 8000]; // 3s → 5s → 8s
+
     while (cycle < maxCycles && !this.aborted) {
       cycle++;
 
@@ -255,8 +259,10 @@ export class Orchestrator {
         break;
       }
 
-      // 等待一个分析间隔
-      await this.safeSleep(this.config.analysisInterval);
+      // 智能退避：根据连续 working 次数选择间隔
+      const intervalIndex = Math.min(consecutiveWorking, backoffSteps.length - 1);
+      const currentInterval = backoffSteps[intervalIndex];
+      await this.safeSleep(currentInterval);
 
       // 快速路径：扫描 [NEED_HUMAN] 关键词（零 token）
       const interventionReason = this.session?.output?.scanInterventionSignal();
@@ -295,6 +301,7 @@ export class Orchestrator {
         this.safeWrite('\r');
         await this.safeSleep(3000);
         consecutiveIdle = 0;
+        consecutiveWorking = 0;  // 确认后重置退避
         continue;
       }
 
@@ -313,20 +320,24 @@ export class Orchestrator {
       switch (analysis.state) {
         case 'working':
           consecutiveIdle = 0;
+          consecutiveWorking++;  // 退避累加
           break;
 
         case 'waiting_input':
           consecutiveIdle = 0;
+          consecutiveWorking = 0;  // 状态变化，重置退避
           await this.handleWaitingInput(task, analysis);
           break;
 
         case 'error':
           consecutiveIdle = 0;
+          consecutiveWorking = 0;  // 状态变化，重置退避
           await this.handleError(task, analysis);
           break;
 
         case 'completed':
           consecutiveIdle = 0;
+          consecutiveWorking = 0;  // 状态变化，重置退避
           shouldReturn = !(await this.handleCompleted(task));
           if (shouldReturn) return;
           // handleCompleted 返回 true → 修复指令已发送，重置计数继续监控

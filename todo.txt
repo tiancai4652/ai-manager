@@ -1,7 +1,20 @@
-项目目录下添加 生成日志，可以分析找出可优化的点
-token不浪费
-进度很慢有没有地方能展示大模型的交互信息？
+1 智能退避 — 连续 working 时加大分析间隔 (3s→5s→8s) ✅
+2 清理 todo.txt ✅
+3 npm link 全局可用 ✅
+4 v0.2 版本发布
 
+---
 
-1，选模型的方式而不是写模型名称
-我想选模型的方式而不是写，而是读取当前有哪些模型，然后选择，就像claudecode或codex的/model一样 
+Token 优化方向（按实测数据优先级）：
+
+5 快速状态预判 — 正则零 token 预判 working/completed/idle，确定时跳过 LLM
+  （实测输出分析占 45% token，是最大优化点）
+6 动态分析行数 — working 取 15 行，error/completed 取 40 行
+7 Prompt 缓存 — API 模式下标记 system prompt 为 cacheable
+  （claude-cli 模式不适用）
+
+体验优化方向：
+
+8 aimanager status — 查看正在运行的任务（支持后台运行时）
+9 更完善的人工介入 — 区分"可选介入"和"必须介入"
+10 Codex 适配 — 验证和调优 --agent codex 模式

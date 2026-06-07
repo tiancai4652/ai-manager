@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createProgram } from './cli/commands.js';
+// NOTE: shebang line preserved by tsc — required for `npm link` / global install
 import { BackgroundService } from './reminder/services/BackgroundService.js';
 
 // ─── 检查是否以托盘模式启动 ──────────────────────────────

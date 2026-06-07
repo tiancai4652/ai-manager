@@ -1,6 +1,6 @@
 {
   "name": "ai-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "AI coding agent orchestrator — autonomously manages Claude Code / CodeX sessions to complete complex tasks",
   "main": "dist/index.js",
   "bin": {
